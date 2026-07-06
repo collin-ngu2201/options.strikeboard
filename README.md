@@ -1,5 +1,11 @@
 # Strikeboard — deploy to Vercel
 
+Two pages:
+- /         — full multi-leg strategy builder (15 templates)
+- /doubles  — dedicated double calendar & double diagonal desk with
+              front/back expiry pickers, wing controls, and a back-month
+              IV shift slider
+
 An options strategy analyzer (multi-leg P/L, Greeks, live delayed US chains
 from Cboe). The `api/chain.js` serverless function fetches Cboe server-side,
 so the browser never hits CORS.

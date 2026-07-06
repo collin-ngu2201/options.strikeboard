@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Strikeboard — Options Strategy Builder</title>
+<title>Strikeboard Doubles — Double Calendar & Double Diagonal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -133,10 +133,10 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
 
 <header>
   <div>
-    <div class="wordmark">STRIKE<b>BOARD</b></div>
-    <div class="tag">US options · multi-leg P/L</div>
+    <div class="wordmark">STRIKE<b>BOARD</b> · DOUBLES</div>
+    <div class="tag">double calendars &amp; double diagonals</div>
   </div>
-  <a href="/doubles" style="font-family:var(--mono);font-size:10.5px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:6px 10px">doubles desk &rarr;</a>
+  <a href="/" style="font-family:var(--mono);font-size:10.5px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:6px 10px">&larr; full builder</a>
   <div class="spacer"></div>
   <div class="quote" id="quote" hidden>
     <span id="qSym" style="color:var(--muted);font-size:12px"></span>
@@ -157,36 +157,37 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
     <div class="field">
       <span class="panel-label">Strategy</span>
       <select id="template">
-        <optgroup label="Single leg">
-          <option value="long_call">Long call</option>
-          <option value="long_put">Long put</option>
-          <option value="covered_call">Covered call</option>
-          <option value="csp">Cash-secured put</option>
-        </optgroup>
-        <optgroup label="Vertical spreads">
-          <option value="bull_call">Bull call spread (debit)</option>
-          <option value="bear_put">Bear put spread (debit)</option>
-          <option value="bull_put">Bull put spread (credit)</option>
-          <option value="bear_call">Bear call spread (credit)</option>
-        </optgroup>
-        <optgroup label="Volatility">
-          <option value="straddle">Long straddle</option>
-          <option value="strangle">Long strangle</option>
-          <option value="iron_condor" selected>Iron condor</option>
-          <option value="iron_fly">Iron butterfly</option>
-          <option value="call_fly">Call butterfly</option>
-        </optgroup>
-        <optgroup label="Time spreads">
-          <option value="calendar">Calendar spread (calls)</option>
-          <option value="diagonal">Diagonal spread (calls)</option>
-        </optgroup>
-        <option value="custom">Custom / manual</option>
+        <option value="double_calendar" selected>Double calendar</option>
+        <option value="double_diagonal">Double diagonal</option>
       </select>
     </div>
 
+    <div class="row2">
+      <div class="field">
+        <span class="panel-label">Front expiry (short)</span>
+        <select id="expSel" disabled><option>Load first</option></select>
+      </div>
+      <div class="field">
+        <span class="panel-label">Back expiry (long)</span>
+        <select id="backExpSel" disabled><option>Load first</option></select>
+      </div>
+    </div>
+
+    <div class="row2">
+      <div class="field">
+        <span class="panel-label">Wing distance (% OTM)</span>
+        <input id="wingPct" type="number" min="0" max="20" step="0.5" value="4">
+      </div>
+      <div class="field" id="diagField">
+        <span class="panel-label">Diagonal offset (strikes)</span>
+        <input id="diagSteps" type="number" min="1" max="5" step="1" value="1">
+      </div>
+    </div>
+
     <div class="field">
-      <span class="panel-label">Expiration</span>
-      <select id="expSel" disabled><option>Load a chain first</option></select>
+      <span class="panel-label">Back-month IV shift <span id="ivShiftLabel" style="color:var(--accent)">+0%</span></span>
+      <input id="ivShift" type="range" min="-30" max="30" step="1" value="0" style="width:100%;accent-color:var(--accent);padding:0;background:none;border:none">
+      <span style="font-family:var(--mono);font-size:10px;color:var(--faint)">stress the long legs' implied vol in the model curves &mdash; calendars live and die by back-month IV</span>
     </div>
 
     <div class="field">
@@ -231,7 +232,7 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
 </div>
 
 <footer>
-  Data: Cboe delayed quotes (~15 min) via cdn.cboe.com · Model curves use Black-Scholes with per-contract implied vol, r = 4.50% · Educational tool, not investment advice.
+  Calendar/diagonal outcomes at front expiry depend on where back-month IV lands &mdash; the payoff line holds each leg's IV constant (plus your shift). Data: Cboe delayed quotes (~15 min) via cdn.cboe.com · Model curves use Black-Scholes with per-contract implied vol, r = 4.50% · Educational tool, not investment advice.
 </footer>
 
 <script>
@@ -435,10 +436,36 @@ function mkLeg(side, type, strike, exp, qty=1){
 
 /* ---------- strategy templates ---------- */
 const TEMPLATE_NAMES = {
-  long_call:'Long call', long_put:'Long put', covered_call:'Covered call', csp:'Cash-secured put',
-  bull_call:'Bull call spread', bear_put:'Bear put spread', bull_put:'Bull put spread', bear_call:'Bear call spread',
-  straddle:'Long straddle', strangle:'Long strangle', iron_condor:'Iron condor', iron_fly:'Iron butterfly',
-  call_fly:'Call butterfly', calendar:'Calendar spread', diagonal:'Diagonal spread', custom:'Custom position',
+  double_calendar: 'Double calendar',
+  double_diagonal: 'Double diagonal',
+};
+function buildDouble(kind, front, back, wingPct, diagSteps){
+  const S = state.spot;
+  const ef = state.chain.get(front), eb = state.chain.get(back);
+  if (!ef || !eb) return [];
+  const w = Math.max(0, wingPct) / 100;
+  const putShortK  = nearestStrike(ef.strikes, S * (1 - w));
+  const callShortK = nearestStrike(ef.strikes, S * (1 + w));
+  let putLongK  = nearestStrike(eb.strikes, putShortK);
+  let callLongK = nearestStrike(eb.strikes, callShortK);
+  if (kind === 'double_diagonal'){
+    const n = Math.max(1, Math.round(diagSteps));
+    putLongK  = offsetStrike(eb.strikes, putLongK, -n);   // long put further OTM (below)
+    callLongK = offsetStrike(eb.strikes, callLongK, +n);  // long call further OTM (above)
+  }
+  return [
+    mkLeg(-1, 'P', putShortK,  front),
+    mkLeg(+1, 'P', putLongK,   back),
+    mkLeg(-1, 'C', callShortK, front),
+    mkLeg(+1, 'C', callLongK,  back),
+  ];
+}
+function buildTemplate(name, _exp){
+  const front = document.getElementById('expSel').value;
+  const back  = document.getElementById('backExpSel').value;
+  const wing  = +document.getElementById('wingPct').value || 4;
+  const steps = +document.getElementById('diagSteps').value || 1;
+  return buildDouble(name, front, back, wing, steps);
 };
 function buildTemplate(name, exp){
   const S = state.spot, e = state.chain.get(exp);
@@ -472,11 +499,14 @@ function buildTemplate(name, exp){
 }
 
 /* ---------- position analytics ---------- */
+state.ivShift = 0;   // relative shift applied to legs expiring after the front expiry
 function legValue(leg, S, atDate){
   // value per share/contract-unit at time atDate (ms epoch)
   if (leg.type === 'S') return S;
   const T = yearsTo(leg.exp, atDate);
-  return bsPrice(leg.type, S, leg.strike, T, leg.iv || 0.25);
+  let iv = leg.iv || 0.25;
+  if (state.ivShift && leg.exp !== earliestExpiry()) iv = Math.max(0.01, iv * (1 + state.ivShift));
+  return bsPrice(leg.type, S, leg.strike, T, iv);
 }
 function positionPL(S, atDate){
   let pl = 0;
@@ -605,16 +635,27 @@ function renderQuote(){
 }
 
 /* ---------- expiration select ---------- */
+function expOption(e){
+  const d = Math.round(yearsTo(e)*365);
+  return `<option value="${e}">${e}  ·  ${d}d</option>`;
+}
 function renderExpSel(){
-  const sel = $('expSel');
-  sel.disabled = false;
-  sel.innerHTML = state.expiries.map(e => {
-    const d = Math.round(yearsTo(e)*365);
-    return `<option value="${e}">${e}  ·  ${d}d</option>`;
-  }).join('');
-  // default: first expiry ≥ 20 DTE if available
-  const pick = state.expiries.find(e => yearsTo(e)*365 >= 20) || state.expiries[0];
-  if (pick) sel.value = pick;
+  const f = $('expSel');
+  f.disabled = false;
+  f.innerHTML = state.expiries.map(expOption).join('');
+  const pickF = state.expiries.find(e => yearsTo(e)*365 >= 14) || state.expiries[0];
+  if (pickF) f.value = pickF;
+  renderBackExpSel();
+}
+function renderBackExpSel(){
+  const b = $('backExpSel'), front = $('expSel').value;
+  const after = state.expiries.filter(e => e > front);
+  b.disabled = !after.length;
+  b.innerHTML = after.length ? after.map(expOption).join('') : '<option>none after front</option>';
+  if (!after.length) return;
+  const fd = yearsTo(front)*365;
+  const pickB = after.find(e => yearsTo(e)*365 >= fd + 21) || after[0];
+  b.value = pickB;
 }
 
 /* ---------- legs editor ---------- */
@@ -835,7 +876,6 @@ function renderChain(){
   $('chainScroll').querySelectorAll('.mini button').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       state.legs.push(mkLeg(+btn.dataset.s, btn.dataset.t, +btn.dataset.k, exp));
-      $('template').value = 'custom';
       rerender();
     });
   });
@@ -870,28 +910,36 @@ async function loadSymbol(sym){
 }
 function afterLoad(){
   renderQuote(); renderExpSel();
-  state.legs = buildTemplate($('template').value, $('expSel').value);
+  $('diagField').style.opacity = $('template').value === 'double_calendar' ? '.35' : '1';
+  $('diagSteps').disabled = $('template').value === 'double_calendar';
+  state.legs = buildTemplate($('template').value);
   rerender(); renderChain();
 }
 
 /* ---------- events ---------- */
 $('loadBtn').addEventListener('click', ()=> loadSymbol($('ticker').value.trim().toUpperCase()));
 $('ticker').addEventListener('keydown', e=>{ if (e.key==='Enter') $('loadBtn').click(); });
-$('template').addEventListener('change', ()=>{
+function rebuildDouble(){
   if (!state.expiries.length) return;
-  if ($('template').value !== 'custom') state.legs = buildTemplate($('template').value, $('expSel').value);
+  $('diagField').style.opacity = $('template').value === 'double_calendar' ? '.35' : '1';
+  $('diagSteps').disabled = $('template').value === 'double_calendar';
+  state.legs = buildTemplate($('template').value);
   rerender();
-});
-$('expSel').addEventListener('change', ()=>{
-  if ($('template').value !== 'custom') state.legs = buildTemplate($('template').value, $('expSel').value);
-  else state.legs.forEach(l=>{ if (l.exp){ l.exp = $('expSel').value; const ks = state.chain.get(l.exp).strikes; l.strike = nearestStrike(ks, l.strike); refreshLegPrice(l); }});
-  rerender(); renderChain();
+}
+$('template').addEventListener('change', rebuildDouble);
+$('expSel').addEventListener('change', ()=>{ renderBackExpSel(); rebuildDouble(); renderChain(); });
+$('backExpSel').addEventListener('change', rebuildDouble);
+$('wingPct').addEventListener('change', rebuildDouble);
+$('diagSteps').addEventListener('change', rebuildDouble);
+$('ivShift').addEventListener('input', ()=>{
+  state.ivShift = (+$('ivShift').value)/100;
+  $('ivShiftLabel').textContent = `${state.ivShift>=0?'+':''}${Math.round(state.ivShift*100)}%`;
+  rerenderNoLegs();
 });
 $('addLeg').addEventListener('click', ()=>{
   if (!state.expiries.length) return;
   const exp = $('expSel').value;
   state.legs.push(mkLeg(+1,'C', nearestStrike(state.chain.get(exp).strikes, state.spot), exp));
-  $('template').value = 'custom';
   rerender();
 });
 $('allStrikes').addEventListener('change', renderChain);
