@@ -466,36 +466,6 @@ function buildTemplate(name, _exp){
   const wing  = +document.getElementById('wingPct').value || 4;
   const steps = +document.getElementById('diagSteps').value || 1;
   return buildDouble(name, front, back, wing, steps);
-};
-function buildTemplate(name, exp){
-  const S = state.spot, e = state.chain.get(exp);
-  if (!e) return [];
-  const K = e.strikes, atm = nearestStrike(K, S);
-  const pct = p => nearestStrike(K, S*(1+p));
-  const nextExp = state.expiries[Math.min(state.expiries.length-1, state.expiries.indexOf(exp)+1)];
-  switch(name){
-    case 'long_call':    return [mkLeg(+1,'C',atm,exp)];
-    case 'long_put':     return [mkLeg(+1,'P',atm,exp)];
-    case 'covered_call': return [mkLeg(+1,'S',null,null,100), mkLeg(-1,'C',pct(0.05),exp)];
-    case 'csp':          return [mkLeg(-1,'P',pct(-0.05),exp)];
-    case 'bull_call':    return [mkLeg(+1,'C',atm,exp), mkLeg(-1,'C',pct(0.04),exp)];
-    case 'bear_put':     return [mkLeg(+1,'P',atm,exp), mkLeg(-1,'P',pct(-0.04),exp)];
-    case 'bull_put':     return [mkLeg(-1,'P',pct(-0.03),exp), mkLeg(+1,'P',pct(-0.07),exp)];
-    case 'bear_call':    return [mkLeg(-1,'C',pct(0.03),exp), mkLeg(+1,'C',pct(0.07),exp)];
-    case 'straddle':     return [mkLeg(+1,'C',atm,exp), mkLeg(+1,'P',atm,exp)];
-    case 'strangle':     return [mkLeg(+1,'C',pct(0.05),exp), mkLeg(+1,'P',pct(-0.05),exp)];
-    case 'iron_condor':  return [mkLeg(+1,'P',pct(-0.09),exp), mkLeg(-1,'P',pct(-0.05),exp),
-                                 mkLeg(-1,'C',pct(0.05),exp),  mkLeg(+1,'C',pct(0.09),exp)];
-    case 'iron_fly':     return [mkLeg(+1,'P',pct(-0.06),exp), mkLeg(-1,'P',atm,exp),
-                                 mkLeg(-1,'C',atm,exp),        mkLeg(+1,'C',pct(0.06),exp)];
-    case 'call_fly': {
-      const w = Math.max(1, Math.round((S*0.04)/strikeStep(K,S)));
-      return [mkLeg(+1,'C',offsetStrike(K,atm,-w),exp), mkLeg(-1,'C',atm,exp,2), mkLeg(+1,'C',offsetStrike(K,atm,w),exp)];
-    }
-    case 'calendar':     return [mkLeg(-1,'C',atm,exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S),nextExp)];
-    case 'diagonal':     return [mkLeg(-1,'C',pct(0.04),exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S*0.98),nextExp)];
-    default:             return state.legs.length ? state.legs : [mkLeg(+1,'C',atm,exp)];
-  }
 }
 
 /* ---------- position analytics ---------- */
