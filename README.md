@@ -29,6 +29,18 @@ To verify the proxy directly, open:
 Push this folder to a GitHub repo and click "Add New → Project" in the
 Vercel dashboard. Every push then redeploys automatically.
 
+## Testing
+
+Run `node tests.js` from the project folder before deploying — 31 assertions
+covering all pricing and probability math. All must pass.
+
+## Real-time data (optional)
+
+Add `TRADIER_TOKEN` in Vercel → Settings → Environment Variables and /api/chain
+switches from Cboe delayed to Tradier real-time automatically (same response shape).
+Verify the first response after enabling — the adapter is written to Tradier's spec
+but shipped untested without a key.
+
 ## Notes
 
 - Data: Cboe delayed quotes (~15 min), cached 60s at the edge. Intended for

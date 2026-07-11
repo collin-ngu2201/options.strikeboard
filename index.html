@@ -74,6 +74,11 @@ header{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:14px 22px
 .leg input.qty{width:46px}
 #addLeg{border:1px dashed var(--line);background:transparent;color:var(--muted);border-radius:8px;padding:9px;font-size:12.5px}
 #addLeg:hover{color:var(--text);border-color:var(--muted)}
+.mini-act{flex:1;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:6px;padding:6px 4px;font-family:var(--mono);font-size:10px}
+.mini-act:hover{color:var(--text);border-color:var(--muted)}
+.saved-row{display:flex;gap:6px;align-items:center;font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid var(--line-soft);border-radius:6px;padding:4px 8px}
+.saved-row a{color:var(--accent);cursor:pointer}
+table.chain tr.em-band td.strike{border-left:2px solid rgba(245,177,76,.5)}
 
 /* ---------- metrics ---------- */
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden}
@@ -147,6 +152,8 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
     <span class="stamp" id="qStamp"></span>
   </div>
   <div class="tickerbox">
+    <span style="font-family:var(--mono);font-size:10px;color:var(--faint)">r%</span>
+    <input id="rIn" type="number" min="0" max="20" step="0.05" style="width:62px" aria-label="Risk-free rate percent">
     <input id="ticker" value="SPY" maxlength="8" spellcheck="false" aria-label="Ticker symbol">
     <button id="loadBtn">Load chain</button>
   </div>
@@ -187,8 +194,17 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
     </div>
 
     <div class="field">
-      <span class="panel-label">Expiration</span>
+      <span class="panel-label">Expiration <span id="emLabel" style="color:var(--accent);text-transform:none;letter-spacing:0"></span></span>
       <select id="expSel" disabled><option>Load a chain first</option></select>
+    </div>
+
+    <div class="field">
+      <span class="panel-label">Model date: <span id="tDaysLabel" style="color:var(--accent)">today</span></span>
+      <input id="tDays" type="range" min="0" max="45" step="1" value="0" style="width:100%;accent-color:var(--accent);padding:0;background:none;border:none">
+    </div>
+    <div class="field">
+      <span class="panel-label">IV shift (all legs, model) <span id="ivShiftLabel" style="color:var(--accent)">+0%</span></span>
+      <input id="ivShift" type="range" min="-40" max="40" step="1" value="0" style="width:100%;accent-color:var(--accent);padding:0;background:none;border:none">
     </div>
 
     <div class="field">
@@ -200,6 +216,13 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
     <div class="field">
       <span class="panel-label">Position</span>
       <div class="metrics" id="metrics"></div>
+      <div id="riskNotes" style="font-family:var(--mono);font-size:10.5px;color:var(--loss);line-height:1.6"></div>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <button class="mini-act" id="copyLink">copy link</button>
+        <button class="mini-act" id="pinCmp">pin compare</button>
+        <button class="mini-act" id="savePos">save</button>
+      </div>
+      <div id="savedList" style="display:flex;flex-direction:column;gap:4px"></div>
     </div>
   </aside>
 
@@ -207,7 +230,7 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
     <div class="chart-card">
       <div class="chart-head">
         <span id="stratTitle">—</span>
-        <span class="legend"><span><i></i>At expiration</span><span><i class="dash"></i>Today (model)</span></span>
+        <span class="legend"><span><i></i>At expiration</span><span><i class="dash"></i><span id="legendNow">Today (model)</span></span></span>
       </div>
       <canvas id="chart" height="380"></canvas>
       <div id="tip"></div>
@@ -225,6 +248,7 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
           <input type="checkbox" id="allStrikes" style="width:auto"> all strikes
         </label>
       </div>
+      <canvas id="skew" height="64" style="width:100%;height:64px;display:block;border-bottom:1px solid var(--line)"></canvas>
       <div class="chain-scroll" id="chainScroll">
         <div class="skel">Load a ticker to see its chain. B adds a long leg, S adds a short leg.</div>
       </div>
@@ -236,346 +260,7 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
   Data: Cboe delayed quotes (~15 min) via cdn.cboe.com · Model curves use Black-Scholes with per-contract implied vol, r = 4.50% · Educational tool, not investment advice.
 </footer>
 
-<script>
-"use strict";
-/* =================================================================
-   Strikeboard — math, data layer, strategy templates
-   ================================================================= */
-const R = 0.045;                 // risk-free rate assumption
-const MS_YEAR = 365 * 24 * 3600 * 1000;
-
-/* ---------- Black-Scholes ---------- */
-function normCdf(x){ // Abramowitz-Stegun erf approximation
-  const t = 1/(1+0.2316419*Math.abs(x));
-  const d = 0.3989422804014327*Math.exp(-x*x/2);
-  let p = d*t*(0.319381530+t*(-0.356563782+t*(1.781477937+t*(-1.821255978+t*1.330274429))));
-  return x >= 0 ? 1-p : p;
-}
-function bsPrice(type, S, K, T, iv){
-  if (T <= 1e-7 || iv <= 1e-6) {
-    return type === 'C' ? Math.max(S-K,0) : Math.max(K-S,0);
-  }
-  const sq = iv*Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(R+iv*iv/2)*T)/sq;
-  const d2 = d1-sq;
-  if (type === 'C') return S*normCdf(d1)-K*Math.exp(-R*T)*normCdf(d2);
-  return K*Math.exp(-R*T)*normCdf(-d2)-S*normCdf(-d1);
-}
-function bsGreeks(type, S, K, T, iv){
-  if (T <= 1e-7 || iv <= 1e-6){
-    const itm = type==='C' ? S>K : S<K;
-    return {delta: itm ? (type==='C'?1:-1) : 0, gamma:0, theta:0, vega:0, rho:0};
-  }
-  const sq = iv*Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(R+iv*iv/2)*T)/sq;
-  const d2 = d1-sq;
-  const pdf = Math.exp(-d1*d1/2)/Math.sqrt(2*Math.PI);
-  const delta = type==='C' ? normCdf(d1) : normCdf(d1)-1;
-  const gamma = pdf/(S*sq);
-  const vega  = S*pdf*Math.sqrt(T)/100;                       // per 1 vol pt
-  const theta = (-(S*pdf*iv)/(2*Math.sqrt(T))
-                 - (type==='C'? 1:-1)*R*K*Math.exp(-R*T)*normCdf((type==='C'?1:-1)*d2))/365;
-  const rho   = (type==='C'? 1:-1)*K*T*Math.exp(-R*T)*normCdf((type==='C'?1:-1)*d2)/100;
-  return {delta,gamma,theta,vega,rho};
-}
-
-/* ---------- state ---------- */
-const state = {
-  symbol: null,
-  spot: null,
-  prevClose: null,
-  stamp: null,
-  chain: new Map(),   // expiry "YYYY-MM-DD" -> { calls: Map(strike->q), puts: Map(strike->q), strikes:[...] }
-  expiries: [],
-  legs: [],           // {side:+1/-1, type:'C'|'P'|'S', strike, exp, qty, price, iv, greeks}
-  demo: false,
-};
-
-/* ---------- OCC symbol parsing ---------- */
-const OCC_RE = /^([A-Z0-9._^]+?)(\d{6})([CP])(\d{8})$/;
-function parseOcc(sym){
-  const m = OCC_RE.exec(sym.trim());
-  if (!m) return null;
-  const [, , d, cp, k] = m;
-  return {
-    exp: `20${d.slice(0,2)}-${d.slice(2,4)}-${d.slice(4,6)}`,
-    type: cp,
-    strike: parseInt(k,10)/1000,
-  };
-}
-
-/* ---------- data: Cboe delayed quotes ----------
-   Preferred route: this app's own serverless proxy (/api/chain), which
-   fetches Cboe server-side — no CORS involved. Fallbacks: direct fetch,
-   then public CORS relays (useful when the file is opened standalone). */
-async function fetchCboe(sym){
-  const base = s => `https://cdn.cboe.com/api/global/delayed_quotes/options/${s}.json`;
-  const attempts = [
-    ['server',     `/api/chain?symbol=${encodeURIComponent(sym)}`, true],   // tries _SYM itself
-    ['direct',     base(sym), false],
-    ['direct',     base('_'+sym), false],
-    ['allorigins', 'https://api.allorigins.win/raw?url='+encodeURIComponent(base(sym)), false],
-    ['allorigins', 'https://api.allorigins.win/raw?url='+encodeURIComponent(base('_'+sym)), false],
-    ['corsproxy',  'https://corsproxy.io/?url='+encodeURIComponent(base(sym)), false],
-    ['corsproxy',  'https://corsproxy.io/?url='+encodeURIComponent(base('_'+sym)), false],
-    ['codetabs',   'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(base(sym)), false],
-  ];
-  let lastErr = null;
-  for (const [name, url, authoritative] of attempts){
-    try{
-      const r = await fetch(url, {cache:'no-store'});
-      if (r.status === 404){
-        lastErr = new Error(`no listed options found for "${sym}"`);
-        if (authoritative) throw lastErr;   // server already tried both symbol variants
-        continue;
-      }
-      if (!r.ok){ lastErr = new Error(`HTTP ${r.status} via ${name}`); continue; }
-      const j = JSON.parse(await r.text());
-      if (j && j.data && Array.isArray(j.data.options) && j.data.options.length){
-        state.route = name;
-        return j;
-      }
-      lastErr = new Error('empty chain via ' + name);
-    }catch(e){
-      if (e === lastErr) throw e;           // authoritative 404 — stop immediately
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error('all data routes failed');
-}
-
-function ingestChain(json, sym){
-  const d = json.data || {};
-  state.symbol = sym;
-  state.spot = d.current_price ?? d.close ?? d.last_trade_price ?? null;
-  state.prevClose = d.prev_day_close ?? d.close ?? null;
-  state.stamp = json.timestamp || d.last_trade_time || '';
-  state.chain = new Map();
-  for (const o of (d.options || [])){
-    const p = parseOcc(o.option || '');
-    if (!p) continue;
-    let e = state.chain.get(p.exp);
-    if (!e){ e = {calls:new Map(), puts:new Map(), strikes:new Set()}; state.chain.set(p.exp, e); }
-    const q = {
-      bid: +o.bid || 0, ask: +o.ask || 0,
-      last: +o.last_trade_price || 0,
-      iv: +o.iv || 0,
-      delta: +o.delta || 0, gamma: +o.gamma || 0,
-      theta: +o.theta || 0, vega: +o.vega || 0, rho: +o.rho || 0,
-      oi: +o.open_interest || 0, vol: +o.volume || 0,
-    };
-    (p.type==='C' ? e.calls : e.puts).set(p.strike, q);
-    e.strikes.add(p.strike);
-  }
-  const today = new Date().toISOString().slice(0,10);
-  state.expiries = [...state.chain.keys()].filter(x => x >= today).sort();
-  for (const e of state.chain.values()) e.strikes = [...e.strikes].sort((a,b)=>a-b);
-}
-
-/* ---------- demo chain (synthetic, for offline/preview use) ---------- */
-function buildDemoChain(){
-  const S = 100, now = Date.now();
-  const expiries = [10, 31, 59, 94].map(dd => new Date(now + dd*864e5).toISOString().slice(0,10));
-  state.symbol = 'DEMO'; state.spot = S; state.prevClose = 99.2;
-  state.stamp = 'synthetic sample data'; state.demo = true;
-  state.chain = new Map();
-  for (const exp of expiries){
-    const T = Math.max((new Date(exp+'T21:00:00Z') - now)/MS_YEAR, 1e-4);
-    const e = {calls:new Map(), puts:new Map(), strikes:[]};
-    for (let K = 60; K <= 140.01; K += 2.5){
-      const skew = 0.24 + 0.35*Math.max(0,(S-K)/S) + 0.10*Math.max(0,(K-S)/S); // put skew
-      const iv = skew + 0.02*Math.random();
-      for (const t of ['C','P']){
-        const px = bsPrice(t, S, K, T, iv);
-        const spr = Math.max(0.02, px*0.03);
-        const g = bsGreeks(t, S, K, T, iv);
-        (t==='C'?e.calls:e.puts).set(K, {
-          bid:+(Math.max(0,px-spr/2)).toFixed(2), ask:+(px+spr/2).toFixed(2), last:+px.toFixed(2),
-          iv:+iv.toFixed(4), delta:+g.delta.toFixed(4), gamma:+g.gamma.toFixed(4),
-          theta:+g.theta.toFixed(4), vega:+g.vega.toFixed(4), rho:+g.rho.toFixed(4),
-          oi: Math.round(3000*Math.exp(-Math.abs(K-S)/8)), vol: Math.round(800*Math.exp(-Math.abs(K-S)/6)),
-        });
-      }
-      e.strikes.push(K);
-    }
-    state.chain.set(exp, e);
-  }
-  state.expiries = expiries;
-}
-
-/* ---------- quote helpers ---------- */
-function getQ(exp, type, strike){
-  const e = state.chain.get(exp); if (!e) return null;
-  return (type==='C' ? e.calls : e.puts).get(strike) || null;
-}
-function mid(q){ if (!q) return 0; return (q.bid>0 && q.ask>0) ? (q.bid+q.ask)/2 : (q.last || q.ask || q.bid || 0); }
-function yearsTo(exp, from = Date.now()){ return Math.max((new Date(exp+'T21:00:00Z') - from)/MS_YEAR, 0); }
-function nearestStrike(strikes, target){
-  let best = strikes[0];
-  for (const k of strikes) if (Math.abs(k-target) < Math.abs(best-target)) best = k;
-  return best;
-}
-function strikeStep(strikes, around){
-  const i = strikes.indexOf(nearestStrike(strikes, around));
-  const a = strikes[Math.max(0,i-1)], b = strikes[Math.min(strikes.length-1,i+1)];
-  return Math.max((b-a)/2, 0.5) || 1;
-}
-function offsetStrike(strikes, from, steps){
-  const i = strikes.indexOf(from);
-  return strikes[Math.min(strikes.length-1, Math.max(0, i+steps))];
-}
-
-/* ---------- leg factory ---------- */
-function mkLeg(side, type, strike, exp, qty=1){
-  const q = type==='S' ? null : getQ(exp, type, strike);
-  return {
-    side, type, strike: type==='S' ? null : strike, exp: type==='S' ? null : exp,
-    qty, price: type==='S' ? +state.spot.toFixed(2) : +mid(q).toFixed(2),
-    iv: q ? q.iv : 0,
-  };
-}
-
-/* ---------- strategy templates ---------- */
-const TEMPLATE_NAMES = {
-  long_call:'Long call', long_put:'Long put', covered_call:'Covered call', csp:'Cash-secured put',
-  bull_call:'Bull call spread', bear_put:'Bear put spread', bull_put:'Bull put spread', bear_call:'Bear call spread',
-  straddle:'Long straddle', strangle:'Long strangle', iron_condor:'Iron condor', iron_fly:'Iron butterfly',
-  call_fly:'Call butterfly', calendar:'Calendar spread', diagonal:'Diagonal spread', custom:'Custom position',
-};
-function buildTemplate(name, exp){
-  const S = state.spot, e = state.chain.get(exp);
-  if (!e) return [];
-  const K = e.strikes, atm = nearestStrike(K, S);
-  const pct = p => nearestStrike(K, S*(1+p));
-  const nextExp = state.expiries[Math.min(state.expiries.length-1, state.expiries.indexOf(exp)+1)];
-  switch(name){
-    case 'long_call':    return [mkLeg(+1,'C',atm,exp)];
-    case 'long_put':     return [mkLeg(+1,'P',atm,exp)];
-    case 'covered_call': return [mkLeg(+1,'S',null,null,100), mkLeg(-1,'C',pct(0.05),exp)];
-    case 'csp':          return [mkLeg(-1,'P',pct(-0.05),exp)];
-    case 'bull_call':    return [mkLeg(+1,'C',atm,exp), mkLeg(-1,'C',pct(0.04),exp)];
-    case 'bear_put':     return [mkLeg(+1,'P',atm,exp), mkLeg(-1,'P',pct(-0.04),exp)];
-    case 'bull_put':     return [mkLeg(-1,'P',pct(-0.03),exp), mkLeg(+1,'P',pct(-0.07),exp)];
-    case 'bear_call':    return [mkLeg(-1,'C',pct(0.03),exp), mkLeg(+1,'C',pct(0.07),exp)];
-    case 'straddle':     return [mkLeg(+1,'C',atm,exp), mkLeg(+1,'P',atm,exp)];
-    case 'strangle':     return [mkLeg(+1,'C',pct(0.05),exp), mkLeg(+1,'P',pct(-0.05),exp)];
-    case 'iron_condor':  return [mkLeg(+1,'P',pct(-0.09),exp), mkLeg(-1,'P',pct(-0.05),exp),
-                                 mkLeg(-1,'C',pct(0.05),exp),  mkLeg(+1,'C',pct(0.09),exp)];
-    case 'iron_fly':     return [mkLeg(+1,'P',pct(-0.06),exp), mkLeg(-1,'P',atm,exp),
-                                 mkLeg(-1,'C',atm,exp),        mkLeg(+1,'C',pct(0.06),exp)];
-    case 'call_fly': {
-      const w = Math.max(1, Math.round((S*0.04)/strikeStep(K,S)));
-      return [mkLeg(+1,'C',offsetStrike(K,atm,-w),exp), mkLeg(-1,'C',atm,exp,2), mkLeg(+1,'C',offsetStrike(K,atm,w),exp)];
-    }
-    case 'calendar':     return [mkLeg(-1,'C',atm,exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S),nextExp)];
-    case 'diagonal':     return [mkLeg(-1,'C',pct(0.04),exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S*0.98),nextExp)];
-    default:             return state.legs.length ? state.legs : [mkLeg(+1,'C',atm,exp)];
-  }
-}
-
-/* ---------- position analytics ---------- */
-function legValue(leg, S, atDate){
-  // value per share/contract-unit at time atDate (ms epoch)
-  if (leg.type === 'S') return S;
-  const T = yearsTo(leg.exp, atDate);
-  return bsPrice(leg.type, S, leg.strike, T, leg.iv || 0.25);
-}
-function positionPL(S, atDate){
-  let pl = 0;
-  for (const l of state.legs){
-    const mult = l.type==='S' ? 1 : 100;
-    pl += l.side * l.qty * mult * (legValue(l, S, atDate) - l.price);
-  }
-  return pl;
-}
-function earliestExpiry(){
-  const es = state.legs.filter(l=>l.exp).map(l=>l.exp).sort();
-  return es[0] || null;
-}
-function evalDates(){
-  const e = earliestExpiry();
-  return { now: Date.now(), exp: e ? new Date(e+'T21:00:00Z').getTime() : Date.now() };
-}
-function priceRange(){
-  const S = state.spot;
-  const ks = state.legs.filter(l=>l.strike).map(l=>l.strike);
-  const lo = Math.min(S, ...(ks.length?ks:[S]));
-  const hi = Math.max(S, ...(ks.length?ks:[S]));
-  const pad = Math.max((hi-lo)*0.9, S*0.16);
-  return [Math.max(0.01, lo-pad), hi+pad];
-}
-function curve(atDate, n=241){
-  const [a,b] = priceRange(), pts = [];
-  for (let i=0;i<n;i++){ const S = a + (b-a)*i/(n-1); pts.push([S, positionPL(S, atDate)]); }
-  return pts;
-}
-function breakevens(pts){
-  const out = [];
-  for (let i=1;i<pts.length;i++){
-    const [x0,y0] = pts[i-1], [x1,y1] = pts[i];
-    if ((y0<=0 && y1>0) || (y0>=0 && y1<0)){
-      out.push(x0 + (x1-x0)*(-y0)/(y1-y0 || 1e-9));
-    }
-  }
-  return out;
-}
-function netPremium(){
-  let c = 0;
-  for (const l of state.legs) c += -l.side * l.qty * (l.type==='S'?1:100) * l.price;
-  return c; // + credit received, - debit paid
-}
-function extremes(pts, atDate){
-  let mx=-Infinity, mn=Infinity;
-  for (const [,y] of pts){ mx=Math.max(mx,y); mn=Math.min(mn,y); }
-  // true downside floor: underlying cannot trade below 0
-  const floor = positionPL(0.01, atDate);
-  mx = Math.max(mx, floor); mn = Math.min(mn, floor);
-  // asymptotic behavior for S → ∞ (payoffs are ~linear far OTM)
-  const hugeS = Math.max(state.spot*50, pts[pts.length-1][0]*10);
-  const p1 = positionPL(hugeS, atDate), p2 = positionPL(hugeS*1.05, atDate);
-  const slope = (p2-p1)/(hugeS*0.05);
-  let maxP = mx, maxL = mn;
-  if (slope > 1e-4) maxP = Infinity;
-  else if (slope < -1e-4) maxL = -Infinity;
-  else { maxP = Math.max(maxP, p1); maxL = Math.min(maxL, p1); }
-  return {maxP, maxL};
-}
-function popEstimate(pts){
-  // P(P/L > 0 at expiry) under lognormal with ATM IV of the earliest expiry
-  const e = earliestExpiry(); if (!e || !state.spot) return null;
-  const ch = state.chain.get(e); if (!ch) return null;
-  const atm = nearestStrike(ch.strikes, state.spot);
-  const iv = (mid2 => mid2)( (ch.calls.get(atm)?.iv || 0) || (ch.puts.get(atm)?.iv || 0) ) || 0.25;
-  const T = yearsTo(e); if (T <= 0) return null;
-  const cdf = x => normCdf((Math.log(x/state.spot) - (R - iv*iv/2)*T)/(iv*Math.sqrt(T)));
-  let p = 0, inProfit = pts[0][1] > 0, start = 0; // start of profit region (as price)
-  const first = pts[0][0], last = pts[pts.length-1][0];
-  if (inProfit) start = first;
-  for (let i=1;i<pts.length;i++){
-    const cross = (pts[i-1][1]<=0) !== (pts[i][1]<=0);
-    if (cross){
-      const x = pts[i-1][0] + (pts[i][0]-pts[i-1][0])*(-pts[i-1][1])/((pts[i][1]-pts[i-1][1])||1e-9);
-      if (inProfit){ p += cdf(x) - cdf(start); inProfit=false; }
-      else { start = x; inProfit=true; }
-    }
-  }
-  if (inProfit) p += cdf(last*10) - cdf(start);           // open-ended upside
-  if (pts[0][1] > 0) p += cdf(first) - 0;                  // tail below sampled range
-  return Math.min(1, Math.max(0, p));
-}
-function netGreeks(){
-  const g = {delta:0,gamma:0,theta:0,vega:0,rho:0};
-  for (const l of state.legs){
-    if (l.type==='S'){ g.delta += l.side*l.qty; continue; }
-    const q = getQ(l.exp, l.type, l.strike);
-    let lg;
-    if (q && (q.delta || q.gamma || q.vega)) lg = q;
-    else lg = bsGreeks(l.type, state.spot, l.strike, yearsTo(l.exp), l.iv || 0.25);
-    for (const k of ['delta','gamma','theta','vega','rho']) g[k] += l.side*l.qty*100*(lg[k]||0);
-  }
-  return g;
-}
-</script>
+<script src="common.js"></script>
 
 <script>
 "use strict";
@@ -583,6 +268,13 @@ function netGreeks(){
    Strikeboard — UI: legs editor, metrics, chain table, payoff chart
    ================================================================= */
 const $ = id => document.getElementById(id);
+let tDays = 0;
+function evalDatesUI(){
+  const d = evalDates();
+  const cap = Math.max(0, (d.exp - Date.now())/864e5 - 0.05);
+  const t = Math.min(tDays, cap);
+  return { now: Date.now() + t*864e5, exp: d.exp, t };
+}
 const fmt$ = (v, dp=2) => {
   if (v === Infinity) return 'Unlimited';
   if (v === -Infinity) return 'Unlimited';
@@ -680,6 +372,13 @@ function renderMetrics(){
   const prem = netPremium();
   const pop = popEstimate(pts);
   const rr = (maxP!==Infinity && maxL!==-Infinity && maxL!==0) ? Math.abs(maxP/maxL) : null;
+  const ev = evAtExpiry();
+  const p50 = (maxP!==Infinity && maxP>0) ? probPLAbove(0.5*maxP) : null;
+  let bp = null, bpNote = '';
+  if (maxL !== -Infinity && maxL < 0){ bp = -maxL; }
+  else { const naked = state.legs.filter(l=>l.side<0 && l.type!=='S').reduce((a,l)=>a+l.qty,0);
+         if (naked>0){ bp = 0.20*state.spot*100*naked; bpNote=' <small>est. 20% rule</small>'; } }
+  const robp = (bp && maxP!==Infinity) ? maxP/bp : null;
   const m = [
     ['Net ' + (prem>=0?'credit':'debit'), `<span class="${prem>=0?'up':'dn'}">${fmt$(Math.abs(prem))}</span>`],
     ['Est. POP', pop==null?'—':(100*pop).toFixed(1)+'%'],
@@ -687,12 +386,24 @@ function renderMetrics(){
     ['Max loss', `<span class="dn">${maxL===-Infinity?'Unlimited':fmt$(maxL)}</span>`],
     ['Breakeven' + (bes.length>1?'s':''), bes.length? bes.map(b=>b.toFixed(2)).join(' / ') : '—'],
     ['Risk / reward', rr==null?'—':rr.toFixed(2)],
+    ['Model EV @exp', ev==null?'—':`<span class="${cls$(ev)}">${fmt$(ev)}</span>`],
+    ['P(≥50% max)', p50==null?'—':(100*p50).toFixed(1)+'%'],
+    ['Buying power', bp==null?'—':fmt$(bp)+bpNote],
+    ['Return on BP', robp==null?'—':(100*robp).toFixed(1)+'%'],
   ];
   $('metrics').innerHTML = m.map(([k,v])=>`<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   const g = netGreeks();
   const gg = [['Delta',g.delta,2],['Gamma',g.gamma,3],['Theta',g.theta,2],['Vega',g.vega,2],['Rho',g.rho,2]];
   $('greeks').innerHTML = gg.map(([k,v,dp])=>`<div class="metric"><div class="k">${k}</div><div class="v ${cls$(v)}">${v>=0?'+':''}${v.toFixed(dp)}</div></div>`).join('');
+
+  const notes = [];
+  for (const sk of shortStrikes()){
+    const pt = probTouch(sk.strike);
+    if (pt != null) notes.push(`<span style="color:var(--muted)">P(touch ${fmtK(sk.strike)}${sk.type} before exp) ≈ ${(100*pt).toFixed(0)}%</span>`);
+  }
+  for (const w of assignmentWarnings(EURO_STYLE.has(state.symbol))) notes.push('⚠ '+w);
+  $('riskNotes').innerHTML = notes.join('<br>');
 
   const name = TEMPLATE_NAMES[$('template').value] || 'Position';
   const legTxt = state.legs.map(l=>`${l.side>0?'+':'−'}${l.qty>1?l.qty+'×':''}${l.type==='S'?'stk':fmtK(l.strike)+l.type}`).join(' ');
@@ -709,7 +420,7 @@ function drawChart(){
   ctx.clearRect(0,0,W,H);
   if (!state.legs.length || state.spot == null){ chart.x=null; return; }
 
-  const dts = evalDates();
+  const dts = evalDatesUI();
   const expPts = curve(dts.exp), nowPts = curve(dts.now);
   chart.exp = expPts; chart.now = nowPts;
   const xs = expPts.map(p=>p[0]);
@@ -762,7 +473,15 @@ function drawChart(){
   ctx.fillStyle = css('--muted'); ctx.textAlign='center';
   ctx.fillText('spot '+state.spot.toFixed(2), sx, t+10);
 
-  // T+0 model curve
+  // pinned comparison (grey), if any
+  if (pinned){
+    ctx.strokeStyle = 'rgba(138,148,168,.55)'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); pinned.exp.forEach(([x,y],i)=> i? ctx.lineTo(X(x),Y(y)) : ctx.moveTo(X(x),Y(y))); ctx.stroke();
+    ctx.fillStyle = 'rgba(138,148,168,.8)'; ctx.textAlign='left';
+    ctx.fillText('pinned: '+pinned.label, l+8, t+12);
+  }
+
+  // T+n model curve
   ctx.setLineDash([5,4]); ctx.strokeStyle = css('--blue'); ctx.lineWidth = 1.6;
   ctx.beginPath(); nowPts.forEach(([x,y],i)=> i? ctx.lineTo(X(x),Y(y)) : ctx.moveTo(X(x),Y(y))); ctx.stroke();
   ctx.setLineDash([]);
@@ -787,7 +506,7 @@ function chartHover(ev){
   const mx = ev.clientX - rect.left;
   if (mx < chart.pad.l || mx > chart.W - chart.pad.r){ tip.style.display='none'; drawChart(); return; }
   const S = chart.xs[0] + (mx - chart.pad.l)/(chart.W - chart.pad.l - chart.pad.r) * (chart.xs[1]-chart.xs[0]);
-  const dts = evalDates();
+  const dts = evalDatesUI();
   const pe = positionPL(S, dts.exp), pn = positionPL(S, dts.now);
   drawChart();
   const ctx = cv.getContext('2d');
@@ -813,12 +532,15 @@ function renderChain(){
   const atm = nearestStrike(e.strikes, state.spot);
   const ai = e.strikes.indexOf(atm);
   const ks = all ? e.strikes : e.strikes.slice(Math.max(0,ai-14), ai+15);
+  const em = expectedMove(exp);
+  const emLo = em!=null ? state.spot-em : null, emHi = em!=null ? state.spot+em : null;
   const rows = ks.map(k=>{
     const c = e.calls.get(k), p = e.puts.get(k);
     const cell = (q,f,dp=2)=> q&&q[f] ? (f==='iv'? (100*q.iv).toFixed(1) : (+q[f]).toFixed(dp)) : '·';
     const btns = (t)=>`<span class="mini"><button class="b" data-t="${t}" data-k="${k}" data-s="1" title="Buy ${t==='C'?'call':'put'} ${fmtK(k)}">B</button><button class="s" data-t="${t}" data-k="${k}" data-s="-1" title="Sell ${t==='C'?'call':'put'} ${fmtK(k)}">S</button></span>`;
     const citm = k < state.spot ? 'itm':'', pitm = k > state.spot ? 'itm':'';
-    return `<tr class="${k===atm?'atm':''}">
+    const inEm = emLo!=null && k>=emLo && k<=emHi;
+    return `<tr class="${k===atm?'atm':''}${inEm?' em-band':''}">
       <td>${btns('C')}</td>
       <td class="${citm}">${cell(c,'bid')}</td><td class="${citm}">${c?mid(c).toFixed(2):'·'}</td><td class="${citm}">${cell(c,'ask')}</td>
       <td>${cell(c,'iv')}</td><td>${cell(c,'delta')}</td><td>${c?c.oi.toLocaleString():'·'}</td>
@@ -845,6 +567,38 @@ function renderChain(){
     const cont = $('chainScroll'), atmRow = cont.querySelector('tr.atm');
     if (atmRow) cont.scrollTop = Math.max(0, atmRow.offsetTop - cont.clientHeight/2);
   }
+  drawSkew(exp);
+  updateEmLabel();
+}
+function updateEmLabel(){
+  const exp = $('expSel').value, em = expectedMove(exp);
+  $('emLabel').textContent = em!=null ? ` · exp. move ±${em.toFixed(2)} (${(100*em/state.spot).toFixed(1)}%)` : '';
+}
+function drawSkew(exp){
+  const e = state.chain.get(exp), cv = $('skew'); if (!e || !cv) return;
+  const ctx = cv.getContext('2d'), dpr = window.devicePixelRatio||1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+  const pts = [];
+  for (const k of e.strikes){
+    if (Math.abs(k-state.spot)/state.spot > 0.20) continue;
+    const c = e.calls.get(k), p = e.puts.get(k);
+    const iv = k < state.spot ? (p&&p.iv) : (c&&c.iv);   // OTM side of the smile
+    if (iv) pts.push([k, iv]);
+  }
+  if (pts.length < 4) return;
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]);
+  const x0=Math.min(...xs), x1=Math.max(...xs);
+  const y0=Math.min(...ys)*0.98, y1=Math.max(...ys)*1.02;
+  const X=v=>10+(v-x0)/(x1-x0)*(W-20), Y=v=>H-10-(v-y0)/(y1-y0)*(H-22);
+  ctx.strokeStyle=css('--blue'); ctx.lineWidth=1.5;
+  ctx.beginPath(); pts.forEach(([x,y],i)=> i? ctx.lineTo(X(x),Y(y)) : ctx.moveTo(X(x),Y(y))); ctx.stroke();
+  const sx=X(Math.min(Math.max(state.spot,x0),x1));
+  ctx.setLineDash([2,3]); ctx.strokeStyle=css('--faint');
+  ctx.beginPath(); ctx.moveTo(sx,6); ctx.lineTo(sx,H-6); ctx.stroke(); ctx.setLineDash([]);
+  ctx.font='9px JetBrains Mono, monospace'; ctx.fillStyle=css('--faint');
+  ctx.textAlign='left'; ctx.fillText(`IV smile (OTM) ${(100*y0).toFixed(0)}–${(100*Math.max(...ys)).toFixed(0)}%`, 10, 12);
 }
 
 /* ---------- orchestration ---------- */
@@ -871,6 +625,7 @@ async function loadSymbol(sym){
   }
 }
 function afterLoad(){
+  sbSet('sb_lastTicker', state.symbol);
   renderQuote(); renderExpSel();
   state.legs = buildTemplate($('template').value, $('expSel').value);
   rerender(); renderChain();
@@ -901,8 +656,93 @@ $('chart').addEventListener('mousemove', chartHover);
 $('chart').addEventListener('mouseleave', ()=>{ $('tip').style.display='none'; drawChart(); });
 window.addEventListener('resize', drawChart);
 
+/* ---------- v2: save / share / compare ---------- */
+let pinned = null;
+function encodePos(){
+  const legs = state.legs.map(l=>[l.side,l.type,l.strike??'',l.exp??'',l.qty,l.price].join(',')).join(';');
+  return '#p=' + encodeURIComponent(state.symbol + '|' + legs);
+}
+function decodePos(hash){
+  try{
+    const m = /#p=(.+)/.exec(hash); if (!m) return null;
+    const [sym, legStr] = decodeURIComponent(m[1]).split('|');
+    const legs = legStr.split(';').map(x=>{
+      const [side,type,strike,exp,qty,price] = x.split(',');
+      return { side:+side, type, strike: strike===''?null:+strike, exp: exp===''?null:exp, qty:+qty, price:+price, iv:0.25 };
+    });
+    return { sym, legs };
+  }catch(e){ return null; }
+}
+function applyRestoredLegs(legs){
+  for (const l of legs){
+    if (l.type!=='S' && l.exp && state.chain.get(l.exp)){
+      const q = getQ(l.exp, l.type, l.strike);
+      if (q) l.iv = q.iv;
+    }
+  }
+  state.legs = legs;
+  $('template').value = 'custom';
+  rerender();
+}
+$('copyLink').addEventListener('click', ()=>{
+  const url = location.origin + location.pathname + encodePos();
+  navigator.clipboard?.writeText(url);
+  history.replaceState(null,'',encodePos());
+  $('copyLink').textContent = 'copied!';
+  setTimeout(()=>{ $('copyLink').textContent='copy link'; }, 1200);
+});
+$('pinCmp').addEventListener('click', ()=>{
+  if (pinned){ pinned = null; $('pinCmp').textContent='pin compare'; drawChart(); return; }
+  const dts = evalDatesUI();
+  pinned = { exp: curve(dts.exp), label: (TEMPLATE_NAMES[$('template').value]||'position') };
+  $('pinCmp').textContent = 'unpin';
+  drawChart();
+});
+function renderSaved(){
+  const list = sbGet('sb_positions', []);
+  $('savedList').innerHTML = list.map((p,i)=>
+    `<div class="saved-row"><span style="flex:1">${p.name}</span><a data-a="load" data-i="${i}">load</a><a data-a="del" data-i="${i}">×</a></div>`).join('');
+  $('savedList').querySelectorAll('a').forEach(a=>a.addEventListener('click', async ()=>{
+    const list = sbGet('sb_positions', []); const i = +a.dataset.i;
+    if (a.dataset.a==='del'){ list.splice(i,1); sbSet('sb_positions', list); renderSaved(); return; }
+    const p = decodePos(list[i].hash);
+    if (!p) return;
+    if (p.sym !== state.symbol){ $('ticker').value = p.sym; await loadSymbol(p.sym); }
+    applyRestoredLegs(p.legs);
+  }));
+}
+$('savePos').addEventListener('click', ()=>{
+  const list = sbGet('sb_positions', []);
+  const legTxt = state.legs.map(l=>`${l.side>0?'+':'-'}${l.type==='S'?'stk':fmtK(l.strike)+l.type}`).join(' ');
+  list.unshift({ name: `${state.symbol} ${legTxt}`.slice(0,44), hash: encodePos() });
+  sbSet('sb_positions', list.slice(0,12));
+  renderSaved();
+});
+
+/* ---------- v2: model controls + rate ---------- */
+$('tDays').addEventListener('input', ()=>{
+  tDays = +$('tDays').value;
+  $('tDaysLabel').textContent = tDays===0 ? 'today' : `today + ${tDays}d`;
+  $('legendNow').textContent = tDays===0 ? 'Today (model)' : `T+${tDays}d (model)`;
+  drawChart();
+});
+$('ivShift').addEventListener('input', ()=>{
+  state.ivShift = (+$('ivShift').value)/100;
+  $('ivShiftLabel').textContent = `${state.ivShift>=0?'+':''}${Math.round(state.ivShift*100)}%`;
+  rerenderNoLegs();
+});
+$('rIn').value = (100*R).toFixed(2);
+$('rIn').addEventListener('change', ()=>{ setR((+$('rIn').value||4.5)/100); rerenderNoLegs(); });
+
 /* ---------- boot ---------- */
-loadSymbol('SPY');
+renderSaved();
+(async ()=>{
+  const restored = decodePos(location.hash);
+  const sym = restored ? restored.sym : (sbGet('sb_lastTicker','SPY'));
+  $('ticker').value = sym;
+  await loadSymbol(sym);
+  if (restored && state.expiries.length) applyRestoredLegs(restored.legs);
+})();
 </script>
 </body>
 </html>

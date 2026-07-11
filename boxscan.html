@@ -182,6 +182,31 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
       </select>
     </div>
 
+    <div class="row2">
+      <div class="field">
+        <span class="panel-label">Direction</span>
+        <select id="dir">
+          <option value="long" selected>Long box — lend cash</option>
+          <option value="short">Short box — borrow cash</option>
+        </select>
+      </div>
+      <div class="field">
+        <span class="panel-label" id="hurdleLabel">My cash rate (%)</span>
+        <input id="hurdle" type="number" min="0" max="25" step="0.05" value="4.10">
+      </div>
+    </div>
+
+    <div class="row2">
+      <div class="field">
+        <span class="panel-label">Max leg spread (% of mid)</span>
+        <input id="maxSpr" type="number" min="1" max="100" step="1" value="12">
+      </div>
+      <div class="field">
+        <span class="panel-label">Min open interest / leg</span>
+        <input id="minOI" type="number" min="0" step="10" value="50">
+      </div>
+    </div>
+
     <div class="field">
       <span class="panel-label">Selected box</span>
       <div class="metrics" id="metrics"></div>
@@ -209,14 +234,26 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
       <div id="tip"></div>
     </div>
 
+    <div class="chart-card">
+      <div class="chart-head"><span class="panel-label">Implied rate term structure — best box APR per expiry</span></div>
+      <canvas id="termChart" height="180" style="width:100%;height:180px;display:block"></canvas>
+    </div>
+
     <div class="chain-card">
       <div class="chain-head">
-        <span class="panel-label">Long boxes — <span id="scanLabel">—</span></span>
+        <span class="panel-label"><span id="dirLabel">Long</span> boxes — <span id="scanLabel">—</span></span>
         <span style="font-family:var(--mono);font-size:10px;color:var(--faint)">click a row to inspect</span>
       </div>
       <div class="chain-scroll" id="results">
         <div class="skel">Load a ticker to scan. XSP (mini-SPX, European-style) is the honest place to look.</div>
       </div>
+    </div>
+    <div class="chain-card">
+      <div class="chain-head">
+        <span class="panel-label">Conversions &amp; reversals (stock + synthetic)</span>
+        <span style="font-family:var(--mono);font-size:10px;color:var(--faint)">stock priced at spot (approx) — dividends &amp; borrow cost not modelled</span>
+      </div>
+      <div class="chain-scroll" id="convResults" style="max-height:260px"><div class="skel">Load a chain.</div></div>
     </div>
   </section>
 </div>
@@ -225,348 +262,7 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
   A long box = +call K1 −call K2 +put K2 −put K1 (K1&lt;K2). Locked value at expiry = (K2−K1)×100 per box. Implied APR = ln(width/cost)/T. r assumption 4.50%. Data: Cboe delayed (~15 min). Educational tool, not investment advice — nothing here is a recommendation to trade.
 </footer>
 
-<script>
-
-"use strict";
-/* =================================================================
-   Strikeboard — math, data layer, strategy templates
-   ================================================================= */
-const R = 0.045;                 // risk-free rate assumption
-const MS_YEAR = 365 * 24 * 3600 * 1000;
-
-/* ---------- Black-Scholes ---------- */
-function normCdf(x){ // Abramowitz-Stegun erf approximation
-  const t = 1/(1+0.2316419*Math.abs(x));
-  const d = 0.3989422804014327*Math.exp(-x*x/2);
-  let p = d*t*(0.319381530+t*(-0.356563782+t*(1.781477937+t*(-1.821255978+t*1.330274429))));
-  return x >= 0 ? 1-p : p;
-}
-function bsPrice(type, S, K, T, iv){
-  if (T <= 1e-7 || iv <= 1e-6) {
-    return type === 'C' ? Math.max(S-K,0) : Math.max(K-S,0);
-  }
-  const sq = iv*Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(R+iv*iv/2)*T)/sq;
-  const d2 = d1-sq;
-  if (type === 'C') return S*normCdf(d1)-K*Math.exp(-R*T)*normCdf(d2);
-  return K*Math.exp(-R*T)*normCdf(-d2)-S*normCdf(-d1);
-}
-function bsGreeks(type, S, K, T, iv){
-  if (T <= 1e-7 || iv <= 1e-6){
-    const itm = type==='C' ? S>K : S<K;
-    return {delta: itm ? (type==='C'?1:-1) : 0, gamma:0, theta:0, vega:0, rho:0};
-  }
-  const sq = iv*Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(R+iv*iv/2)*T)/sq;
-  const d2 = d1-sq;
-  const pdf = Math.exp(-d1*d1/2)/Math.sqrt(2*Math.PI);
-  const delta = type==='C' ? normCdf(d1) : normCdf(d1)-1;
-  const gamma = pdf/(S*sq);
-  const vega  = S*pdf*Math.sqrt(T)/100;                       // per 1 vol pt
-  const theta = (-(S*pdf*iv)/(2*Math.sqrt(T))
-                 - (type==='C'? 1:-1)*R*K*Math.exp(-R*T)*normCdf((type==='C'?1:-1)*d2))/365;
-  const rho   = (type==='C'? 1:-1)*K*T*Math.exp(-R*T)*normCdf((type==='C'?1:-1)*d2)/100;
-  return {delta,gamma,theta,vega,rho};
-}
-
-/* ---------- state ---------- */
-const state = {
-  symbol: null,
-  spot: null,
-  prevClose: null,
-  stamp: null,
-  chain: new Map(),   // expiry "YYYY-MM-DD" -> { calls: Map(strike->q), puts: Map(strike->q), strikes:[...] }
-  expiries: [],
-  legs: [],           // {side:+1/-1, type:'C'|'P'|'S', strike, exp, qty, price, iv, greeks}
-  demo: false,
-};
-
-/* ---------- OCC symbol parsing ---------- */
-const OCC_RE = /^([A-Z0-9._^]+?)(\d{6})([CP])(\d{8})$/;
-function parseOcc(sym){
-  const m = OCC_RE.exec(sym.trim());
-  if (!m) return null;
-  const [, , d, cp, k] = m;
-  return {
-    exp: `20${d.slice(0,2)}-${d.slice(2,4)}-${d.slice(4,6)}`,
-    type: cp,
-    strike: parseInt(k,10)/1000,
-  };
-}
-
-/* ---------- data: Cboe delayed quotes ----------
-   Preferred route: this app's own serverless proxy (/api/chain), which
-   fetches Cboe server-side — no CORS involved. Fallbacks: direct fetch,
-   then public CORS relays (useful when the file is opened standalone). */
-async function fetchCboe(sym){
-  const base = s => `https://cdn.cboe.com/api/global/delayed_quotes/options/${s}.json`;
-  const attempts = [
-    ['server',     `/api/chain?symbol=${encodeURIComponent(sym)}`, true],   // tries _SYM itself
-    ['direct',     base(sym), false],
-    ['direct',     base('_'+sym), false],
-    ['allorigins', 'https://api.allorigins.win/raw?url='+encodeURIComponent(base(sym)), false],
-    ['allorigins', 'https://api.allorigins.win/raw?url='+encodeURIComponent(base('_'+sym)), false],
-    ['corsproxy',  'https://corsproxy.io/?url='+encodeURIComponent(base(sym)), false],
-    ['corsproxy',  'https://corsproxy.io/?url='+encodeURIComponent(base('_'+sym)), false],
-    ['codetabs',   'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(base(sym)), false],
-  ];
-  let lastErr = null;
-  for (const [name, url, authoritative] of attempts){
-    try{
-      const r = await fetch(url, {cache:'no-store'});
-      if (r.status === 404){
-        lastErr = new Error(`no listed options found for "${sym}"`);
-        if (authoritative) throw lastErr;   // server already tried both symbol variants
-        continue;
-      }
-      if (!r.ok){ lastErr = new Error(`HTTP ${r.status} via ${name}`); continue; }
-      const j = JSON.parse(await r.text());
-      if (j && j.data && Array.isArray(j.data.options) && j.data.options.length){
-        state.route = name;
-        return j;
-      }
-      lastErr = new Error('empty chain via ' + name);
-    }catch(e){
-      if (e === lastErr) throw e;           // authoritative 404 — stop immediately
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error('all data routes failed');
-}
-
-function ingestChain(json, sym){
-  const d = json.data || {};
-  state.symbol = sym;
-  state.spot = d.current_price ?? d.close ?? d.last_trade_price ?? null;
-  state.prevClose = d.prev_day_close ?? d.close ?? null;
-  state.stamp = json.timestamp || d.last_trade_time || '';
-  state.chain = new Map();
-  for (const o of (d.options || [])){
-    const p = parseOcc(o.option || '');
-    if (!p) continue;
-    let e = state.chain.get(p.exp);
-    if (!e){ e = {calls:new Map(), puts:new Map(), strikes:new Set()}; state.chain.set(p.exp, e); }
-    const q = {
-      bid: +o.bid || 0, ask: +o.ask || 0,
-      last: +o.last_trade_price || 0,
-      iv: +o.iv || 0,
-      delta: +o.delta || 0, gamma: +o.gamma || 0,
-      theta: +o.theta || 0, vega: +o.vega || 0, rho: +o.rho || 0,
-      oi: +o.open_interest || 0, vol: +o.volume || 0,
-    };
-    (p.type==='C' ? e.calls : e.puts).set(p.strike, q);
-    e.strikes.add(p.strike);
-  }
-  const today = new Date().toISOString().slice(0,10);
-  state.expiries = [...state.chain.keys()].filter(x => x >= today).sort();
-  for (const e of state.chain.values()) e.strikes = [...e.strikes].sort((a,b)=>a-b);
-}
-
-/* ---------- demo chain (synthetic, for offline/preview use) ---------- */
-function buildDemoChain(){
-  const S = 100, now = Date.now();
-  const expiries = [10, 31, 59, 94].map(dd => new Date(now + dd*864e5).toISOString().slice(0,10));
-  state.symbol = 'DEMO'; state.spot = S; state.prevClose = 99.2;
-  state.stamp = 'synthetic sample data'; state.demo = true;
-  state.chain = new Map();
-  for (const exp of expiries){
-    const T = Math.max((new Date(exp+'T21:00:00Z') - now)/MS_YEAR, 1e-4);
-    const e = {calls:new Map(), puts:new Map(), strikes:[]};
-    for (let K = 60; K <= 140.01; K += 2.5){
-      const skew = 0.24 + 0.35*Math.max(0,(S-K)/S) + 0.10*Math.max(0,(K-S)/S); // put skew
-      const iv = skew + 0.02*Math.random();
-      for (const t of ['C','P']){
-        const px = bsPrice(t, S, K, T, iv);
-        const spr = Math.max(0.02, px*0.03);
-        const g = bsGreeks(t, S, K, T, iv);
-        (t==='C'?e.calls:e.puts).set(K, {
-          bid:+(Math.max(0,px-spr/2)).toFixed(2), ask:+(px+spr/2).toFixed(2), last:+px.toFixed(2),
-          iv:+iv.toFixed(4), delta:+g.delta.toFixed(4), gamma:+g.gamma.toFixed(4),
-          theta:+g.theta.toFixed(4), vega:+g.vega.toFixed(4), rho:+g.rho.toFixed(4),
-          oi: Math.round(3000*Math.exp(-Math.abs(K-S)/8)), vol: Math.round(800*Math.exp(-Math.abs(K-S)/6)),
-        });
-      }
-      e.strikes.push(K);
-    }
-    state.chain.set(exp, e);
-  }
-  state.expiries = expiries;
-}
-
-/* ---------- quote helpers ---------- */
-function getQ(exp, type, strike){
-  const e = state.chain.get(exp); if (!e) return null;
-  return (type==='C' ? e.calls : e.puts).get(strike) || null;
-}
-function mid(q){ if (!q) return 0; return (q.bid>0 && q.ask>0) ? (q.bid+q.ask)/2 : (q.last || q.ask || q.bid || 0); }
-function yearsTo(exp, from = Date.now()){ return Math.max((new Date(exp+'T21:00:00Z') - from)/MS_YEAR, 0); }
-function nearestStrike(strikes, target){
-  let best = strikes[0];
-  for (const k of strikes) if (Math.abs(k-target) < Math.abs(best-target)) best = k;
-  return best;
-}
-function strikeStep(strikes, around){
-  const i = strikes.indexOf(nearestStrike(strikes, around));
-  const a = strikes[Math.max(0,i-1)], b = strikes[Math.min(strikes.length-1,i+1)];
-  return Math.max((b-a)/2, 0.5) || 1;
-}
-function offsetStrike(strikes, from, steps){
-  const i = strikes.indexOf(from);
-  return strikes[Math.min(strikes.length-1, Math.max(0, i+steps))];
-}
-
-/* ---------- leg factory ---------- */
-function mkLeg(side, type, strike, exp, qty=1){
-  const q = type==='S' ? null : getQ(exp, type, strike);
-  return {
-    side, type, strike: type==='S' ? null : strike, exp: type==='S' ? null : exp,
-    qty, price: type==='S' ? +state.spot.toFixed(2) : +mid(q).toFixed(2),
-    iv: q ? q.iv : 0,
-  };
-}
-
-/* ---------- strategy templates ---------- */
-const TEMPLATE_NAMES = {
-  long_call:'Long call', long_put:'Long put', covered_call:'Covered call', csp:'Cash-secured put',
-  bull_call:'Bull call spread', bear_put:'Bear put spread', bull_put:'Bull put spread', bear_call:'Bear call spread',
-  straddle:'Long straddle', strangle:'Long strangle', iron_condor:'Iron condor', iron_fly:'Iron butterfly',
-  call_fly:'Call butterfly', calendar:'Calendar spread', diagonal:'Diagonal spread', custom:'Custom position',
-};
-function buildTemplate(name, exp){
-  const S = state.spot, e = state.chain.get(exp);
-  if (!e) return [];
-  const K = e.strikes, atm = nearestStrike(K, S);
-  const pct = p => nearestStrike(K, S*(1+p));
-  const nextExp = state.expiries[Math.min(state.expiries.length-1, state.expiries.indexOf(exp)+1)];
-  switch(name){
-    case 'long_call':    return [mkLeg(+1,'C',atm,exp)];
-    case 'long_put':     return [mkLeg(+1,'P',atm,exp)];
-    case 'covered_call': return [mkLeg(+1,'S',null,null,100), mkLeg(-1,'C',pct(0.05),exp)];
-    case 'csp':          return [mkLeg(-1,'P',pct(-0.05),exp)];
-    case 'bull_call':    return [mkLeg(+1,'C',atm,exp), mkLeg(-1,'C',pct(0.04),exp)];
-    case 'bear_put':     return [mkLeg(+1,'P',atm,exp), mkLeg(-1,'P',pct(-0.04),exp)];
-    case 'bull_put':     return [mkLeg(-1,'P',pct(-0.03),exp), mkLeg(+1,'P',pct(-0.07),exp)];
-    case 'bear_call':    return [mkLeg(-1,'C',pct(0.03),exp), mkLeg(+1,'C',pct(0.07),exp)];
-    case 'straddle':     return [mkLeg(+1,'C',atm,exp), mkLeg(+1,'P',atm,exp)];
-    case 'strangle':     return [mkLeg(+1,'C',pct(0.05),exp), mkLeg(+1,'P',pct(-0.05),exp)];
-    case 'iron_condor':  return [mkLeg(+1,'P',pct(-0.09),exp), mkLeg(-1,'P',pct(-0.05),exp),
-                                 mkLeg(-1,'C',pct(0.05),exp),  mkLeg(+1,'C',pct(0.09),exp)];
-    case 'iron_fly':     return [mkLeg(+1,'P',pct(-0.06),exp), mkLeg(-1,'P',atm,exp),
-                                 mkLeg(-1,'C',atm,exp),        mkLeg(+1,'C',pct(0.06),exp)];
-    case 'call_fly': {
-      const w = Math.max(1, Math.round((S*0.04)/strikeStep(K,S)));
-      return [mkLeg(+1,'C',offsetStrike(K,atm,-w),exp), mkLeg(-1,'C',atm,exp,2), mkLeg(+1,'C',offsetStrike(K,atm,w),exp)];
-    }
-    case 'calendar':     return [mkLeg(-1,'C',atm,exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S),nextExp)];
-    case 'diagonal':     return [mkLeg(-1,'C',pct(0.04),exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S*0.98),nextExp)];
-    default:             return state.legs.length ? state.legs : [mkLeg(+1,'C',atm,exp)];
-  }
-}
-
-/* ---------- position analytics ---------- */
-function legValue(leg, S, atDate){
-  // value per share/contract-unit at time atDate (ms epoch)
-  if (leg.type === 'S') return S;
-  const T = yearsTo(leg.exp, atDate);
-  return bsPrice(leg.type, S, leg.strike, T, leg.iv || 0.25);
-}
-function positionPL(S, atDate){
-  let pl = 0;
-  for (const l of state.legs){
-    const mult = l.type==='S' ? 1 : 100;
-    pl += l.side * l.qty * mult * (legValue(l, S, atDate) - l.price);
-  }
-  return pl;
-}
-function earliestExpiry(){
-  const es = state.legs.filter(l=>l.exp).map(l=>l.exp).sort();
-  return es[0] || null;
-}
-function evalDates(){
-  const e = earliestExpiry();
-  return { now: Date.now(), exp: e ? new Date(e+'T21:00:00Z').getTime() : Date.now() };
-}
-function priceRange(){
-  const S = state.spot;
-  const ks = state.legs.filter(l=>l.strike).map(l=>l.strike);
-  const lo = Math.min(S, ...(ks.length?ks:[S]));
-  const hi = Math.max(S, ...(ks.length?ks:[S]));
-  const pad = Math.max((hi-lo)*0.9, S*0.16);
-  return [Math.max(0.01, lo-pad), hi+pad];
-}
-function curve(atDate, n=241){
-  const [a,b] = priceRange(), pts = [];
-  for (let i=0;i<n;i++){ const S = a + (b-a)*i/(n-1); pts.push([S, positionPL(S, atDate)]); }
-  return pts;
-}
-function breakevens(pts){
-  const out = [];
-  for (let i=1;i<pts.length;i++){
-    const [x0,y0] = pts[i-1], [x1,y1] = pts[i];
-    if ((y0<=0 && y1>0) || (y0>=0 && y1<0)){
-      out.push(x0 + (x1-x0)*(-y0)/(y1-y0 || 1e-9));
-    }
-  }
-  return out;
-}
-function netPremium(){
-  let c = 0;
-  for (const l of state.legs) c += -l.side * l.qty * (l.type==='S'?1:100) * l.price;
-  return c; // + credit received, - debit paid
-}
-function extremes(pts, atDate){
-  let mx=-Infinity, mn=Infinity;
-  for (const [,y] of pts){ mx=Math.max(mx,y); mn=Math.min(mn,y); }
-  // true downside floor: underlying cannot trade below 0
-  const floor = positionPL(0.01, atDate);
-  mx = Math.max(mx, floor); mn = Math.min(mn, floor);
-  // asymptotic behavior for S → ∞ (payoffs are ~linear far OTM)
-  const hugeS = Math.max(state.spot*50, pts[pts.length-1][0]*10);
-  const p1 = positionPL(hugeS, atDate), p2 = positionPL(hugeS*1.05, atDate);
-  const slope = (p2-p1)/(hugeS*0.05);
-  let maxP = mx, maxL = mn;
-  if (slope > 1e-4) maxP = Infinity;
-  else if (slope < -1e-4) maxL = -Infinity;
-  else { maxP = Math.max(maxP, p1); maxL = Math.min(maxL, p1); }
-  return {maxP, maxL};
-}
-function popEstimate(pts){
-  // P(P/L > 0 at expiry) under lognormal with ATM IV of the earliest expiry
-  const e = earliestExpiry(); if (!e || !state.spot) return null;
-  const ch = state.chain.get(e); if (!ch) return null;
-  const atm = nearestStrike(ch.strikes, state.spot);
-  const iv = (mid2 => mid2)( (ch.calls.get(atm)?.iv || 0) || (ch.puts.get(atm)?.iv || 0) ) || 0.25;
-  const T = yearsTo(e); if (T <= 0) return null;
-  const cdf = x => normCdf((Math.log(x/state.spot) - (R - iv*iv/2)*T)/(iv*Math.sqrt(T)));
-  let p = 0, inProfit = pts[0][1] > 0, start = 0; // start of profit region (as price)
-  const first = pts[0][0], last = pts[pts.length-1][0];
-  if (inProfit) start = first;
-  for (let i=1;i<pts.length;i++){
-    const cross = (pts[i-1][1]<=0) !== (pts[i][1]<=0);
-    if (cross){
-      const x = pts[i-1][0] + (pts[i][0]-pts[i-1][0])*(-pts[i-1][1])/((pts[i][1]-pts[i-1][1])||1e-9);
-      if (inProfit){ p += cdf(x) - cdf(start); inProfit=false; }
-      else { start = x; inProfit=true; }
-    }
-  }
-  if (inProfit) p += cdf(last*10) - cdf(start);           // open-ended upside
-  if (pts[0][1] > 0) p += cdf(first) - 0;                  // tail below sampled range
-  return Math.min(1, Math.max(0, p));
-}
-function netGreeks(){
-  const g = {delta:0,gamma:0,theta:0,vega:0,rho:0};
-  for (const l of state.legs){
-    if (l.type==='S'){ g.delta += l.side*l.qty; continue; }
-    const q = getQ(l.exp, l.type, l.strike);
-    let lg;
-    if (q && (q.delta || q.gamma || q.vega)) lg = q;
-    else lg = bsGreeks(l.type, state.spot, l.strike, yearsTo(l.exp), l.iv || 0.25);
-    for (const k of ['delta','gamma','theta','vega','rho']) g[k] += l.side*l.qty*100*(lg[k]||0);
-  }
-  return g;
-}
-
-</script>
+<script src="common.js"></script>
 <script>
 
 "use strict";
@@ -599,57 +295,97 @@ function renderExpSel(){
 
 let boxes = [], selected = -1;
 
+function legOk(q, maxSprPct, minOI){
+  if (!(q && q.bid>0 && q.ask>0)) return false;
+  const m = (q.bid+q.ask)/2;
+  if (m > 0.05 && (q.ask-q.bid)/m > maxSprPct/100) return false;
+  if ((q.oi||0) < minOI) return false;
+  return true;
+}
+function shortExtrinsic(q, type, K){
+  const intr = type==='C' ? Math.max(state.spot-K,0) : Math.max(K-state.spot,0);
+  return (q ? mid(q) : 0) - intr;
+}
 function scan(){
   const exp = $('expSel').value, e = state.chain.get(exp);
   if (!e){ $('results').innerHTML = '<div class="skel">No chain.</div>'; return; }
   const T = yearsTo(exp);
   const mode = $('mode').value, fee = +$('fee').value || 0;
+  const dir = $('dir').value;
+  const maxSprPct = +$('maxSpr').value || 12, minOI = +$('minOI').value || 0;
   const rangePct = (+$('rangePct').value || 8)/100;
   const S = state.spot;
+  const euro = EURO.has(state.symbol);
   const ks = e.strikes.filter(k => Math.abs(k-S)/S <= rangePct)
-    .filter(k => { const c=e.calls.get(k), p=e.puts.get(k); return c&&p&&c.bid>0&&c.ask>0&&p.bid>0&&p.ask>0; })
+    .filter(k => legOk(e.calls.get(k), maxSprPct, minOI) && legOk(e.puts.get(k), maxSprPct, minOI))
     .slice(0, 34);
   boxes = [];
   for (let i=0;i<ks.length;i++) for (let j=i+1;j<ks.length;j++){
     const K1=ks[i], K2=ks[j], w=K2-K1;
     const c1=e.calls.get(K1), c2=e.calls.get(K2), p1=e.puts.get(K1), p2=e.puts.get(K2);
-    // long box: buy call K1, sell call K2, buy put K2, sell put K1
-    const cost = mode==='exec'
-      ? c1.ask - c2.bid + p2.ask - p1.bid
-      : mid(c1) - mid(c2) + mid(p2) - mid(p1);
-    if (cost <= 0) continue;                       // crossed/garbage quotes
     const pv = w*Math.exp(-R*T);
-    const lockedPL = (w - cost)*100;               // at expiry, per box, before fees
     const fees = 4*fee;
-    const apr = T>0 ? Math.log(w/cost)/T : 0;
-    boxes.push({K1,K2,w,cost,pv,lockedPL,fees,net:lockedPL-fees,apr,exp,T,
-      legs:[{s:+1,t:'C',k:K1,px:mode==='exec'?c1.ask:mid(c1),iv:c1.iv},
-            {s:-1,t:'C',k:K2,px:mode==='exec'?c2.bid:mid(c2),iv:c2.iv},
-            {s:+1,t:'P',k:K2,px:mode==='exec'?p2.ask:mid(p2),iv:p2.iv},
-            {s:-1,t:'P',k:K1,px:mode==='exec'?p1.bid:mid(p1),iv:p1.iv}]});
+    let row;
+    if (dir === 'long'){
+      const cost = mode==='exec' ? c1.ask - c2.bid + p2.ask - p1.bid
+                                 : mid(c1) - mid(c2) + mid(p2) - mid(p1);
+      if (cost <= 0) continue;
+      const apr = T>0 ? Math.log(w/cost)/T : 0;
+      row = {K1,K2,w,px:cost,pv,lockedPL:(w-cost)*100,fees,net:(w-cost)*100-fees,apr,
+        shorts:[['C',K2,c2],['P',K1,p1]],
+        legs:[{s:+1,t:'C',k:K1,px:mode==='exec'?c1.ask:mid(c1),iv:c1.iv},
+              {s:-1,t:'C',k:K2,px:mode==='exec'?c2.bid:mid(c2),iv:c2.iv},
+              {s:+1,t:'P',k:K2,px:mode==='exec'?p2.ask:mid(p2),iv:p2.iv},
+              {s:-1,t:'P',k:K1,px:mode==='exec'?p1.bid:mid(p1),iv:p1.iv}]};
+    } else {
+      const credit = mode==='exec' ? c1.bid - c2.ask + p2.bid - p1.ask
+                                   : mid(c1) - mid(c2) + mid(p2) - mid(p1);
+      if (credit <= 0) continue;
+      const apr = T>0 ? Math.log(w/credit)/T : 0;   // implied borrow rate you pay
+      row = {K1,K2,w,px:credit,pv,lockedPL:(credit-w)*100,fees,net:(credit-w)*100-fees,apr,
+        shorts:[['C',K1,c1],['P',K2,p2]],
+        legs:[{s:-1,t:'C',k:K1,px:mode==='exec'?c1.bid:mid(c1),iv:c1.iv},
+              {s:+1,t:'C',k:K2,px:mode==='exec'?c2.ask:mid(c2),iv:c2.iv},
+              {s:-1,t:'P',k:K2,px:mode==='exec'?p2.bid:mid(p2),iv:p2.iv},
+              {s:+1,t:'P',k:K1,px:mode==='exec'?p1.ask:mid(p1),iv:p1.iv}]};
+    }
+    row.exp = exp; row.T = T;
+    row.assignRisk = !euro && row.shorts.some(([t,k,q]) => {
+      const intr = t==='C' ? Math.max(S-k,0) : Math.max(k-S,0);
+      return intr > 0 && shortExtrinsic(q,t,k) < 0.10;
+    });
+    boxes.push(row);
   }
-  boxes.sort((a,b)=>b.net-a.net);
+  const hurdle = (+$('hurdle').value || 0)/100;
+  boxes.sort((a,b)=> dir==='long' ? (b.apr-a.apr) : (a.apr-b.apr));
   boxes = boxes.slice(0, 40);
+  boxes.hurdle = hurdle; boxes.dir = dir;
   renderResults();
   if (boxes.length) select(0);
+  drawTerm();
+  scanConversions();
 }
 
 function renderResults(){
+  const dir = boxes.dir || 'long', hurdle = boxes.hurdle || 0;
+  $('dirLabel').textContent = dir==='long' ? 'Long' : 'Short';
+  $('hurdleLabel').textContent = dir==='long' ? 'My cash rate (%)' : 'My margin rate (%)';
   $('scanLabel').textContent = `${$('expSel').value} · ${$('mode').value==='exec'?'executable':'mid'} pricing`;
-  if (!boxes.length){ $('results').innerHTML = '<div class="skel">No valid boxes in range (need live two-sided quotes on all four legs).</div>'; return; }
+  if (!boxes.length){ $('results').innerHTML = '<div class="skel">No boxes pass the liquidity screen in range (spread/OI filters in the sidebar).</div>'; return; }
+  const beats = b => dir==='long' ? (b.apr - b.fees/(b.px*100*b.T||1)/100 > hurdle) : (b.apr < hurdle);
   const rows = boxes.map((b,i)=>`
     <tr data-i="${i}" style="cursor:pointer${i===selected?';outline:1px solid var(--accent)':''}">
       <td class="strike">${b.K1} / ${b.K2}</td>
       <td>${b.w.toFixed(2)}</td>
-      <td>${b.cost.toFixed(2)}</td>
+      <td>${b.px.toFixed(2)}</td>
       <td>${b.pv.toFixed(2)}</td>
-      <td class="${cls$(b.lockedPL)}">${fmt$(b.lockedPL)}</td>
       <td class="${cls$(b.net)}">${fmt$(b.net)}</td>
-      <td class="${cls$(b.apr - R)}">${(100*b.apr).toFixed(2)}%</td>
+      <td class="${beats(b)?'up':'dn'}">${(100*b.apr).toFixed(2)}%</td>
+      <td>${beats(b) ? '<span class="up">beats '+(100*hurdle).toFixed(2)+'%</span>' : '<span style="color:var(--faint)">below hurdle</span>'}${b.assignRisk?' <span class="dn">⚠assign</span>':''}</td>
     </tr>`).join('');
   $('results').innerHTML = `<table class="chain">
-    <thead><tr><th style="text-align:center">Strikes</th><th>Width</th><th>Cost/sh</th><th>PV(width)</th>
-    <th>Locked P/L @exp</th><th>After fees</th><th>Implied APR</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <thead><tr><th style="text-align:center">Strikes</th><th>Width</th><th>${dir==='long'?'Cost':'Credit'}/sh</th><th>PV(width)</th>
+    <th>Locked P/L @exp</th><th>Implied APR</th><th>vs hurdle</th></tr></thead><tbody>${rows}</tbody></table>`;
   $('results').querySelectorAll('tr[data-i]').forEach(tr=>tr.addEventListener('click',()=>select(+tr.dataset.i)));
 }
 
@@ -658,18 +394,19 @@ function select(i){
   const b = boxes[i];
   state.legs = b.legs.map(l=>({side:l.s, type:l.t, strike:l.k, exp:b.exp, qty:1, price:l.px, iv:l.iv||0.2}));
   const euro = EURO.has(state.symbol);
+  const dir = boxes.dir || 'long';
   const m = [
-    ['Structure', `+${b.K1}C −${b.K2}C +${b.K2}P −${b.K1}P`],
-    ['Cost per box', fmt$(b.cost*100)],
-    ['Locked value @exp', fmt$(b.w*100)],
+    ['Structure', dir==='long' ? `+${b.K1}C −${b.K2}C +${b.K2}P −${b.K1}P` : `−${b.K1}C +${b.K2}C −${b.K2}P +${b.K1}P`],
+    [dir==='long' ? 'Cost per box (you lend)' : 'Credit per box (you borrow)', fmt$(b.px*100)],
+    [dir==='long' ? 'Locked value @exp' : 'Locked repayment @exp', fmt$(b.w*100)],
     ['Locked P/L @exp', `<span class="${cls$(b.lockedPL)}">${fmt$(b.lockedPL)}</span>`],
     ['After fees (4 legs)', `<span class="${cls$(b.net)}">${fmt$(b.net)}</span>`],
-    ['Implied APR vs r', `${(100*b.apr).toFixed(2)}% vs ${(100*R).toFixed(2)}%`],
+    [dir==='long' ? 'Implied lend APR vs r' : 'Implied borrow APR vs r', `${(100*b.apr).toFixed(2)}% vs ${(100*R).toFixed(2)}%`],
     ['Days to expiry', `${Math.round(b.T*365)}`],
-    ['Assignment risk', euro ? '<span class="up">European — none before expiry</span>' : '<span class="dn">American — early assignment possible</span>'],
+    ['Assignment risk', euro ? '<span class="up">European — none before expiry</span>' : (b.assignRisk ? '<span class="dn">American — a short leg is near zero extrinsic (live risk)</span>' : '<span class="dn">American — possible; short legs still carry extrinsic</span>')],
   ];
   $('metrics').innerHTML = m.map(([k,v])=>`<div class="metric" style="grid-column:span 2"><div class="k">${k}</div><div class="v" style="font-size:12.5px">${v}</div></div>`).join('');
-  $('stratTitle').innerHTML = `${state.symbol} long box ${b.K1}/${b.K2} <span style="font-family:var(--mono);font-size:11px;color:var(--faint)">${$('mode').value==='exec'?'executable pricing':'mid pricing (not fillable)'}</span>`;
+  $('stratTitle').innerHTML = `${state.symbol} ${(boxes.dir||'long')} box ${b.K1}/${b.K2} <span style="font-family:var(--mono);font-size:11px;color:var(--faint)">${$('mode').value==='exec'?'executable pricing':'mid pricing (not fillable)'}</span>`;
   renderResults();
   drawFlat(b);
 }
@@ -703,7 +440,78 @@ function drawFlat(b){
   ctx.strokeStyle=css('--accent');ctx.lineWidth=2.2;
   ctx.beginPath();expPts.forEach(([x,y],i)=>i?ctx.lineTo(X(x),Y(y)):ctx.moveTo(X(x),Y(y)));ctx.stroke();
   ctx.fillStyle=css('--muted');ctx.textAlign='left';
-  ctx.fillText(`locked ${fmt$(b.lockedPL)} everywhere`, pad.l+8, Y(b.lockedPL)-8);
+  ctx.fillText(`locked ${fmt$(b.lockedPL)} at every price`, pad.l+8, Y(b.lockedPL)-8);
+}
+
+function drawTerm(){
+  const cv = $('termChart'); if (!cv) return;
+  const ctx = cv.getContext('2d'), dpr = window.devicePixelRatio||1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+  const maxSprPct = +$('maxSpr').value || 12, minOI = +$('minOI').value || 0;
+  const pts = [];
+  for (const exp of state.expiries.slice(0, 12)){
+    const e = state.chain.get(exp), T = yearsTo(exp);
+    if (!e || T < 3/365) continue;
+    const S = state.spot;
+    const ks = e.strikes.filter(k => Math.abs(k-S)/S <= 0.05)
+      .filter(k => legOk(e.calls.get(k), maxSprPct, minOI) && legOk(e.puts.get(k), maxSprPct, minOI));
+    let best = null;
+    for (let i=0;i<ks.length;i++) for (let j=i+1;j<ks.length;j++){
+      const K1=ks[i], K2=ks[j], w=K2-K1;
+      const cost = e.calls.get(K1).ask - e.calls.get(K2).bid + e.puts.get(K2).ask - e.puts.get(K1).bid;
+      if (cost <= 0 || cost >= w) continue;
+      const apr = Math.log(w/cost)/T;
+      if (best===null || apr > best) best = apr;
+    }
+    if (best!==null) pts.push([T*365, best]);
+  }
+  if (pts.length < 2){ ctx.fillStyle=css('--faint'); ctx.font='11px JetBrains Mono, monospace'; ctx.fillText('not enough liquid expiries for a curve', 16, 24); return; }
+  const hurdle = (+$('hurdle').value||0)/100;
+  const xs = pts.map(p=>p[0]), ys = pts.map(p=>p[1]).concat([R, hurdle]);
+  const x0=0, x1=Math.max(...xs)*1.08;
+  const y0=Math.min(...ys)*0.9, y1=Math.max(...ys)*1.1;
+  const pad={l:56,r:14,t:12,b:24};
+  const X=v=>pad.l+(v-x0)/(x1-x0)*(W-pad.l-pad.r), Y=v=>pad.t+(y1-v)/(y1-y0)*(H-pad.t-pad.b);
+  ctx.font='9.5px JetBrains Mono, monospace'; ctx.strokeStyle=css('--line-soft'); ctx.fillStyle=css('--faint');
+  for(let i=0;i<=3;i++){ const v=y0+(y1-y0)*i/3, y=Y(v);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+    ctx.textAlign='right'; ctx.fillText((100*v).toFixed(1)+'%', pad.l-6, y+3); }
+  for(const [d] of pts){ ctx.textAlign='center'; ctx.fillText(Math.round(d)+'d', X(d), H-8); }
+  const line=(v,col,lab)=>{ ctx.setLineDash([4,4]); ctx.strokeStyle=col; ctx.beginPath(); ctx.moveTo(pad.l,Y(v)); ctx.lineTo(W-pad.r,Y(v)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle=col; ctx.textAlign='left'; ctx.fillText(lab+' '+(100*v).toFixed(2)+'%', pad.l+4, Y(v)-4); };
+  line(R, css('--blue'), 'r');
+  line(hurdle, css('--loss'), 'hurdle');
+  ctx.strokeStyle=css('--accent'); ctx.lineWidth=2;
+  ctx.beginPath(); pts.forEach(([d,a],i)=> i? ctx.lineTo(X(d),Y(a)) : ctx.moveTo(X(d),Y(a))); ctx.stroke();
+  ctx.fillStyle=css('--accent');
+  for (const [d,a] of pts){ ctx.beginPath(); ctx.arc(X(d),Y(a),2.6,0,7); ctx.fill(); }
+}
+
+function scanConversions(){
+  const exp = $('expSel').value, e = state.chain.get(exp);
+  if (!e){ $('convResults').innerHTML='<div class="skel">No chain.</div>'; return; }
+  const T = yearsTo(exp), S = state.spot, fee = +$('fee').value || 0;
+  const maxSprPct = +$('maxSpr').value || 12, minOI = +$('minOI').value || 0;
+  const rows = [];
+  for (const K of e.strikes){
+    if (Math.abs(K-S)/S > 0.06) continue;
+    const c = e.calls.get(K), p = e.puts.get(K);
+    if (!legOk(c,maxSprPct,minOI) || !legOk(p,maxSprPct,minOI)) continue;
+    const pvK = K*Math.exp(-R*T);
+    const convEdge = (pvK - (S + p.ask - c.bid)) * 100 - 2*fee;   // long stock + long put + short call
+    const revEdge  = ((S + p.bid - c.ask) - pvK) * 100 - 2*fee;   // short stock + short put + long call
+    rows.push({K, convEdge, revEdge});
+  }
+  rows.sort((a,b)=> Math.max(b.convEdge,b.revEdge) - Math.max(a.convEdge,a.revEdge));
+  const anyPos = rows.some(r=>r.convEdge>0 || r.revEdge>0);
+  $('convResults').innerHTML = rows.length ? `
+    <div style="padding:8px 14px;font-family:var(--mono);font-size:10.5px;color:${anyPos?'var(--accent)':'var(--faint)'};border-bottom:1px solid var(--line)">
+      ${anyPos ? 'Positive edge shown — with delayed quotes and spot-priced stock, treat as stale until verified live.' : 'No conversion or reversal shows positive edge at executable prices — as no-arbitrage predicts.'}</div>
+    <table class="chain"><thead><tr><th>Strike</th><th>Conversion edge</th><th>Reversal edge</th></tr></thead><tbody>
+    ${rows.slice(0,14).map(r=>`<tr><td class="strike">${r.K}</td><td class="${cls$(r.convEdge)}">${fmt$(r.convEdge)}</td><td class="${cls$(r.revEdge)}">${fmt$(r.revEdge)}</td></tr>`).join('')}
+    </tbody></table>` : '<div class="skel">No liquid strikes near spot.</div>';
 }
 
 async function loadSymbol(sym){
@@ -723,7 +531,7 @@ async function loadSymbol(sym){
 
 $('loadBtn').addEventListener('click',()=>loadSymbol($('ticker').value.trim().toUpperCase()));
 $('ticker').addEventListener('keydown',e=>{if(e.key==='Enter')$('loadBtn').click();});
-for (const id of ['expSel','mode','rangePct','fee']) $(id).addEventListener('change', scan);
+for (const id of ['expSel','mode','rangePct','fee','dir','hurdle','maxSpr','minOI']) $(id).addEventListener('change', scan);
 window.addEventListener('resize', ()=>{ if(selected>=0&&boxes[selected]) drawFlat(boxes[selected]); });
 loadSymbol('XSP');
 

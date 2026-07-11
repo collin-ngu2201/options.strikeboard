@@ -169,26 +169,45 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
       </div>
     </div>
 
+    <div class="field">
+      <span class="panel-label">Side</span>
+      <select id="side">
+        <option value="C" selected>Call side (bullish leg-in: own K1/K2, sell K2/K3 on a rally)</option>
+        <option value="P">Put side (bearish leg-in: own K3/K2, sell K2/K1 on a selloff)</option>
+      </select>
+    </div>
     <div class="row2" style="grid-template-columns:1fr 1fr 1fr">
-      <div class="field"><span class="panel-label">K1 (long)</span><select id="k1"></select></div>
-      <div class="field"><span class="panel-label">K2 (short)</span><select id="k2"></select></div>
-      <div class="field"><span class="panel-label">K3 (long)</span><select id="k3"></select></div>
+      <div class="field"><span class="panel-label" id="lab1">K1 (long)</span><select id="k1"></select></div>
+      <div class="field"><span class="panel-label" id="lab2">K2 (short)</span><select id="k2"></select></div>
+      <div class="field"><span class="panel-label" id="lab3">K3 (sell later)</span><select id="k3"></select></div>
     </div>
     <button id="useNow" style="border:1px dashed var(--line);background:transparent;color:var(--muted);border-radius:8px;padding:8px;font-size:12px">Set debit = current K1/K2 cost (fresh entry)</button>
 
     <div class="field">
       <span class="panel-label">Freedom status</span>
       <div class="metrics" id="metrics"></div>
+      <button id="runMc" style="border:1px solid var(--line);background:var(--panel-2);color:var(--text);border-radius:8px;padding:9px;font-size:12px;cursor:pointer;margin-top:6px">▶ Run 5,000-path EV comparison (hold vs leg-in)</button>
+      <div id="mcOut" style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7"></div>
+      <button id="logBtn" style="border:1px dashed var(--line);background:transparent;color:var(--muted);border-radius:8px;padding:8px;font-size:11.5px;cursor:pointer">✎ Log this setup to the journal</button>
     </div>
 
     <div class="field">
-      <span class="panel-label">Iron condor lock-in check</span>
+      <span class="panel-label">Journal — freedom hit-rate <span id="hitRate" style="color:var(--accent)"></span></span>
+      <div id="journal" style="display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:10.5px;color:var(--muted)"></div>
+    </div>
+
+    <div class="field">
+      <span class="panel-label">Iron condor roll planner (live quotes)</span>
       <div style="border:1px solid var(--line);border-radius:8px;padding:11px 12px;background:var(--panel-2);display:flex;flex-direction:column;gap:8px">
         <div class="row2">
           <div class="field"><span class="panel-label" style="font-size:9px">Credits banked ($ total)</span><input id="icCred" type="number" step="1" value="0"></div>
-          <div class="field"><span class="panel-label" style="font-size:9px">Remaining wing width</span><input id="icWidth" type="number" step="0.5" value="5"></div>
+          <div class="field"><span class="panel-label" style="font-size:9px">Threatened side</span><select id="icSide"><option value="P">Put side</option><option value="C">Call side</option></select></div>
         </div>
-        <div id="icStatus" style="font-family:var(--mono);font-size:11.5px;color:var(--muted)">—</div>
+        <div class="row2">
+          <div class="field"><span class="panel-label" style="font-size:9px">Your short strike</span><select id="icShort"></select></div>
+          <div class="field"><span class="panel-label" style="font-size:9px">Your long strike</span><select id="icLong"></select></div>
+        </div>
+        <div id="icStatus" style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7">—</div>
       </div>
     </div>
   </aside>
@@ -203,9 +222,15 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
       <div id="tip"></div>
     </div>
 
+    <div class="chart-card">
+      <div class="chart-head"><span class="panel-label">Freedom spot vs time — theta is racing you</span></div>
+      <canvas id="decayChart" height="170" style="width:100%;height:170px;display:block"></canvas>
+    </div>
+
     <div class="chain-card">
       <div class="chain-head">
-        <span class="panel-label">Entry-credit fly scanner — <span id="scanLabel">—</span></span>
+        <span class="panel-label">Fly scanner — <span id="scanLabel">—</span></span>
+        <select id="wingsMode" style="padding:4px 22px 4px 8px;font-size:10.5px"><option value="equal" selected>equal wings</option><option value="broken">broken wings</option></select>
         <span style="font-family:var(--mono);font-size:10px;color:var(--faint)">a fly with negative executable cost = free money = doesn't survive real quotes</span>
       </div>
       <div class="chain-scroll" id="results"><div class="skel">Load a ticker to scan every equal-wing butterfly.</div></div>
@@ -217,390 +242,101 @@ footer{padding:10px 22px 18px;font-family:var(--mono);font-size:10px;color:var(-
   Long fly payoff is &ge; 0 everywhere, so a genuine entry credit would be an arbitrage; on executable quotes (buy ask / sell bid) it does not exist — treat any hit as a stale delayed quote until proven live. Freedom-spot estimate uses Black-Scholes mid at today's IV and remaining time; actual fill needs the bid. r = 4.50%. Data: Cboe delayed (~15 min). Educational tool, not investment advice.
 </footer>
 
+<script src="common.js"></script>
 <script>
-
 "use strict";
-/* =================================================================
-   Strikeboard — math, data layer, strategy templates
-   ================================================================= */
-const R = 0.045;                 // risk-free rate assumption
-const MS_YEAR = 365 * 24 * 3600 * 1000;
-
-/* ---------- Black-Scholes ---------- */
-function normCdf(x){ // Abramowitz-Stegun erf approximation
-  const t = 1/(1+0.2316419*Math.abs(x));
-  const d = 0.3989422804014327*Math.exp(-x*x/2);
-  let p = d*t*(0.319381530+t*(-0.356563782+t*(1.781477937+t*(-1.821255978+t*1.330274429))));
-  return x >= 0 ? 1-p : p;
+/* ---------- Freefly pure helpers v2 (no DOM) ---------- */
+function optPayoff(type, S, K){ return type==='C' ? Math.max(S-K,0) : Math.max(K-S,0); }
+function vertPLT(type, S, Klong, Kshort, debit){        // long vertical per spread at expiry
+  return (optPayoff(type,S,Klong) - optPayoff(type,S,Kshort) - debit) * 100;
 }
-function bsPrice(type, S, K, T, iv){
-  if (T <= 1e-7 || iv <= 1e-6) {
-    return type === 'C' ? Math.max(S-K,0) : Math.max(K-S,0);
-  }
-  const sq = iv*Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(R+iv*iv/2)*T)/sq;
-  const d2 = d1-sq;
-  if (type === 'C') return S*normCdf(d1)-K*Math.exp(-R*T)*normCdf(d2);
-  return K*Math.exp(-R*T)*normCdf(-d2)-S*normCdf(-d1);
+function flyPLT(type, S, K1, K2, K3, netCost){          // +1 K1 / -2 K2 / +1 K3, netCost<0 = credit
+  return (optPayoff(type,S,K1) - 2*optPayoff(type,S,K2) + optPayoff(type,S,K3) - netCost) * 100;
 }
-function bsGreeks(type, S, K, T, iv){
-  if (T <= 1e-7 || iv <= 1e-6){
-    const itm = type==='C' ? S>K : S<K;
-    return {delta: itm ? (type==='C'?1:-1) : 0, gamma:0, theta:0, vega:0, rho:0};
-  }
-  const sq = iv*Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(R+iv*iv/2)*T)/sq;
-  const d2 = d1-sq;
-  const pdf = Math.exp(-d1*d1/2)/Math.sqrt(2*Math.PI);
-  const delta = type==='C' ? normCdf(d1) : normCdf(d1)-1;
-  const gamma = pdf/(S*sq);
-  const vega  = S*pdf*Math.sqrt(T)/100;                       // per 1 vol pt
-  const theta = (-(S*pdf*iv)/(2*Math.sqrt(T))
-                 - (type==='C'? 1:-1)*R*K*Math.exp(-R*T)*normCdf((type==='C'?1:-1)*d2))/365;
-  const rho   = (type==='C'? 1:-1)*K*T*Math.exp(-R*T)*normCdf((type==='C'?1:-1)*d2)/100;
-  return {delta,gamma,theta,vega,rho};
+function flyFloorPS(type, K1, K2, K3, netCost){
+  // exact min of a piecewise-linear payoff: evaluate at kinks and both tails
+  const probes = [0.01, K1, K2, K3, K3*50];
+  let m = Infinity;
+  for (const S of probes) m = Math.min(m, optPayoff(type,S,K1) - 2*optPayoff(type,S,K2) + optPayoff(type,S,K3));
+  return m - netCost;                                    // per share
 }
-
-/* ---------- state ---------- */
-const state = {
-  symbol: null,
-  spot: null,
-  prevClose: null,
-  stamp: null,
-  chain: new Map(),   // expiry "YYYY-MM-DD" -> { calls: Map(strike->q), puts: Map(strike->q), strikes:[...] }
-  expiries: [],
-  legs: [],           // {side:+1/-1, type:'C'|'P'|'S', strike, exp, qty, price, iv, greeks}
-  demo: false,
-};
-
-/* ---------- OCC symbol parsing ---------- */
-const OCC_RE = /^([A-Z0-9._^]+?)(\d{6})([CP])(\d{8})$/;
-function parseOcc(sym){
-  const m = OCC_RE.exec(sym.trim());
-  if (!m) return null;
-  const [, , d, cp, k] = m;
-  return {
-    exp: `20${d.slice(0,2)}-${d.slice(2,4)}-${d.slice(4,6)}`,
-    type: cp,
-    strike: parseInt(k,10)/1000,
-  };
-}
-
-/* ---------- data: Cboe delayed quotes ----------
-   Preferred route: this app's own serverless proxy (/api/chain), which
-   fetches Cboe server-side — no CORS involved. Fallbacks: direct fetch,
-   then public CORS relays (useful when the file is opened standalone). */
-async function fetchCboe(sym){
-  const base = s => `https://cdn.cboe.com/api/global/delayed_quotes/options/${s}.json`;
-  const attempts = [
-    ['server',     `/api/chain?symbol=${encodeURIComponent(sym)}`, true],   // tries _SYM itself
-    ['direct',     base(sym), false],
-    ['direct',     base('_'+sym), false],
-    ['allorigins', 'https://api.allorigins.win/raw?url='+encodeURIComponent(base(sym)), false],
-    ['allorigins', 'https://api.allorigins.win/raw?url='+encodeURIComponent(base('_'+sym)), false],
-    ['corsproxy',  'https://corsproxy.io/?url='+encodeURIComponent(base(sym)), false],
-    ['corsproxy',  'https://corsproxy.io/?url='+encodeURIComponent(base('_'+sym)), false],
-    ['codetabs',   'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(base(sym)), false],
-  ];
-  let lastErr = null;
-  for (const [name, url, authoritative] of attempts){
-    try{
-      const r = await fetch(url, {cache:'no-store'});
-      if (r.status === 404){
-        lastErr = new Error(`no listed options found for "${sym}"`);
-        if (authoritative) throw lastErr;   // server already tried both symbol variants
-        continue;
-      }
-      if (!r.ok){ lastErr = new Error(`HTTP ${r.status} via ${name}`); continue; }
-      const j = JSON.parse(await r.text());
-      if (j && j.data && Array.isArray(j.data.options) && j.data.options.length){
-        state.route = name;
-        return j;
-      }
-      lastErr = new Error('empty chain via ' + name);
-    }catch(e){
-      if (e === lastErr) throw e;           // authoritative 404 — stop immediately
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error('all data routes failed');
-}
-
-function ingestChain(json, sym){
-  const d = json.data || {};
-  state.symbol = sym;
-  state.spot = d.current_price ?? d.close ?? d.last_trade_price ?? null;
-  state.prevClose = d.prev_day_close ?? d.close ?? null;
-  state.stamp = json.timestamp || d.last_trade_time || '';
-  state.chain = new Map();
-  for (const o of (d.options || [])){
-    const p = parseOcc(o.option || '');
-    if (!p) continue;
-    let e = state.chain.get(p.exp);
-    if (!e){ e = {calls:new Map(), puts:new Map(), strikes:new Set()}; state.chain.set(p.exp, e); }
-    const q = {
-      bid: +o.bid || 0, ask: +o.ask || 0,
-      last: +o.last_trade_price || 0,
-      iv: +o.iv || 0,
-      delta: +o.delta || 0, gamma: +o.gamma || 0,
-      theta: +o.theta || 0, vega: +o.vega || 0, rho: +o.rho || 0,
-      oi: +o.open_interest || 0, vol: +o.volume || 0,
-    };
-    (p.type==='C' ? e.calls : e.puts).set(p.strike, q);
-    e.strikes.add(p.strike);
-  }
-  const today = new Date().toISOString().slice(0,10);
-  state.expiries = [...state.chain.keys()].filter(x => x >= today).sort();
-  for (const e of state.chain.values()) e.strikes = [...e.strikes].sort((a,b)=>a-b);
-}
-
-/* ---------- demo chain (synthetic, for offline/preview use) ---------- */
-function buildDemoChain(){
-  const S = 100, now = Date.now();
-  const expiries = [10, 31, 59, 94].map(dd => new Date(now + dd*864e5).toISOString().slice(0,10));
-  state.symbol = 'DEMO'; state.spot = S; state.prevClose = 99.2;
-  state.stamp = 'synthetic sample data'; state.demo = true;
-  state.chain = new Map();
-  for (const exp of expiries){
-    const T = Math.max((new Date(exp+'T21:00:00Z') - now)/MS_YEAR, 1e-4);
-    const e = {calls:new Map(), puts:new Map(), strikes:[]};
-    for (let K = 60; K <= 140.01; K += 2.5){
-      const skew = 0.24 + 0.35*Math.max(0,(S-K)/S) + 0.10*Math.max(0,(K-S)/S); // put skew
-      const iv = skew + 0.02*Math.random();
-      for (const t of ['C','P']){
-        const px = bsPrice(t, S, K, T, iv);
-        const spr = Math.max(0.02, px*0.03);
-        const g = bsGreeks(t, S, K, T, iv);
-        (t==='C'?e.calls:e.puts).set(K, {
-          bid:+(Math.max(0,px-spr/2)).toFixed(2), ask:+(px+spr/2).toFixed(2), last:+px.toFixed(2),
-          iv:+iv.toFixed(4), delta:+g.delta.toFixed(4), gamma:+g.gamma.toFixed(4),
-          theta:+g.theta.toFixed(4), vega:+g.vega.toFixed(4), rho:+g.rho.toFixed(4),
-          oi: Math.round(3000*Math.exp(-Math.abs(K-S)/8)), vol: Math.round(800*Math.exp(-Math.abs(K-S)/6)),
-        });
-      }
-      e.strikes.push(K);
-    }
-    state.chain.set(exp, e);
-  }
-  state.expiries = expiries;
-}
-
-/* ---------- quote helpers ---------- */
-function getQ(exp, type, strike){
-  const e = state.chain.get(exp); if (!e) return null;
-  return (type==='C' ? e.calls : e.puts).get(strike) || null;
-}
-function mid(q){ if (!q) return 0; return (q.bid>0 && q.ask>0) ? (q.bid+q.ask)/2 : (q.last || q.ask || q.bid || 0); }
-function yearsTo(exp, from = Date.now()){ return Math.max((new Date(exp+'T21:00:00Z') - from)/MS_YEAR, 0); }
-function nearestStrike(strikes, target){
-  let best = strikes[0];
-  for (const k of strikes) if (Math.abs(k-target) < Math.abs(best-target)) best = k;
-  return best;
-}
-function strikeStep(strikes, around){
-  const i = strikes.indexOf(nearestStrike(strikes, around));
-  const a = strikes[Math.max(0,i-1)], b = strikes[Math.min(strikes.length-1,i+1)];
-  return Math.max((b-a)/2, 0.5) || 1;
-}
-function offsetStrike(strikes, from, steps){
-  const i = strikes.indexOf(from);
-  return strikes[Math.min(strikes.length-1, Math.max(0, i+steps))];
-}
-
-/* ---------- leg factory ---------- */
-function mkLeg(side, type, strike, exp, qty=1){
-  const q = type==='S' ? null : getQ(exp, type, strike);
-  return {
-    side, type, strike: type==='S' ? null : strike, exp: type==='S' ? null : exp,
-    qty, price: type==='S' ? +state.spot.toFixed(2) : +mid(q).toFixed(2),
-    iv: q ? q.iv : 0,
-  };
-}
-
-/* ---------- strategy templates ---------- */
-const TEMPLATE_NAMES = {
-  long_call:'Long call', long_put:'Long put', covered_call:'Covered call', csp:'Cash-secured put',
-  bull_call:'Bull call spread', bear_put:'Bear put spread', bull_put:'Bull put spread', bear_call:'Bear call spread',
-  straddle:'Long straddle', strangle:'Long strangle', iron_condor:'Iron condor', iron_fly:'Iron butterfly',
-  call_fly:'Call butterfly', calendar:'Calendar spread', diagonal:'Diagonal spread', custom:'Custom position',
-};
-function buildTemplate(name, exp){
-  const S = state.spot, e = state.chain.get(exp);
-  if (!e) return [];
-  const K = e.strikes, atm = nearestStrike(K, S);
-  const pct = p => nearestStrike(K, S*(1+p));
-  const nextExp = state.expiries[Math.min(state.expiries.length-1, state.expiries.indexOf(exp)+1)];
-  switch(name){
-    case 'long_call':    return [mkLeg(+1,'C',atm,exp)];
-    case 'long_put':     return [mkLeg(+1,'P',atm,exp)];
-    case 'covered_call': return [mkLeg(+1,'S',null,null,100), mkLeg(-1,'C',pct(0.05),exp)];
-    case 'csp':          return [mkLeg(-1,'P',pct(-0.05),exp)];
-    case 'bull_call':    return [mkLeg(+1,'C',atm,exp), mkLeg(-1,'C',pct(0.04),exp)];
-    case 'bear_put':     return [mkLeg(+1,'P',atm,exp), mkLeg(-1,'P',pct(-0.04),exp)];
-    case 'bull_put':     return [mkLeg(-1,'P',pct(-0.03),exp), mkLeg(+1,'P',pct(-0.07),exp)];
-    case 'bear_call':    return [mkLeg(-1,'C',pct(0.03),exp), mkLeg(+1,'C',pct(0.07),exp)];
-    case 'straddle':     return [mkLeg(+1,'C',atm,exp), mkLeg(+1,'P',atm,exp)];
-    case 'strangle':     return [mkLeg(+1,'C',pct(0.05),exp), mkLeg(+1,'P',pct(-0.05),exp)];
-    case 'iron_condor':  return [mkLeg(+1,'P',pct(-0.09),exp), mkLeg(-1,'P',pct(-0.05),exp),
-                                 mkLeg(-1,'C',pct(0.05),exp),  mkLeg(+1,'C',pct(0.09),exp)];
-    case 'iron_fly':     return [mkLeg(+1,'P',pct(-0.06),exp), mkLeg(-1,'P',atm,exp),
-                                 mkLeg(-1,'C',atm,exp),        mkLeg(+1,'C',pct(0.06),exp)];
-    case 'call_fly': {
-      const w = Math.max(1, Math.round((S*0.04)/strikeStep(K,S)));
-      return [mkLeg(+1,'C',offsetStrike(K,atm,-w),exp), mkLeg(-1,'C',atm,exp,2), mkLeg(+1,'C',offsetStrike(K,atm,w),exp)];
-    }
-    case 'calendar':     return [mkLeg(-1,'C',atm,exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S),nextExp)];
-    case 'diagonal':     return [mkLeg(-1,'C',pct(0.04),exp), mkLeg(+1,'C',nearestStrike((state.chain.get(nextExp)||e).strikes,S*0.98),nextExp)];
-    default:             return state.legs.length ? state.legs : [mkLeg(+1,'C',atm,exp)];
-  }
-}
-
-/* ---------- position analytics ---------- */
-function legValue(leg, S, atDate){
-  // value per share/contract-unit at time atDate (ms epoch)
-  if (leg.type === 'S') return S;
-  const T = yearsTo(leg.exp, atDate);
-  return bsPrice(leg.type, S, leg.strike, T, leg.iv || 0.25);
-}
-function positionPL(S, atDate){
-  let pl = 0;
-  for (const l of state.legs){
-    const mult = l.type==='S' ? 1 : 100;
-    pl += l.side * l.qty * mult * (legValue(l, S, atDate) - l.price);
-  }
-  return pl;
-}
-function earliestExpiry(){
-  const es = state.legs.filter(l=>l.exp).map(l=>l.exp).sort();
-  return es[0] || null;
-}
-function evalDates(){
-  const e = earliestExpiry();
-  return { now: Date.now(), exp: e ? new Date(e+'T21:00:00Z').getTime() : Date.now() };
-}
-function priceRange(){
-  const S = state.spot;
-  const ks = state.legs.filter(l=>l.strike).map(l=>l.strike);
-  const lo = Math.min(S, ...(ks.length?ks:[S]));
-  const hi = Math.max(S, ...(ks.length?ks:[S]));
-  const pad = Math.max((hi-lo)*0.9, S*0.16);
-  return [Math.max(0.01, lo-pad), hi+pad];
-}
-function curve(atDate, n=241){
-  const [a,b] = priceRange(), pts = [];
-  for (let i=0;i<n;i++){ const S = a + (b-a)*i/(n-1); pts.push([S, positionPL(S, atDate)]); }
-  return pts;
-}
-function breakevens(pts){
-  const out = [];
-  for (let i=1;i<pts.length;i++){
-    const [x0,y0] = pts[i-1], [x1,y1] = pts[i];
-    if ((y0<=0 && y1>0) || (y0>=0 && y1<0)){
-      out.push(x0 + (x1-x0)*(-y0)/(y1-y0 || 1e-9));
-    }
-  }
-  return out;
-}
-function netPremium(){
-  let c = 0;
-  for (const l of state.legs) c += -l.side * l.qty * (l.type==='S'?1:100) * l.price;
-  return c; // + credit received, - debit paid
-}
-function extremes(pts, atDate){
-  let mx=-Infinity, mn=Infinity;
-  for (const [,y] of pts){ mx=Math.max(mx,y); mn=Math.min(mn,y); }
-  // true downside floor: underlying cannot trade below 0
-  const floor = positionPL(0.01, atDate);
-  mx = Math.max(mx, floor); mn = Math.min(mn, floor);
-  // asymptotic behavior for S → ∞ (payoffs are ~linear far OTM)
-  const hugeS = Math.max(state.spot*50, pts[pts.length-1][0]*10);
-  const p1 = positionPL(hugeS, atDate), p2 = positionPL(hugeS*1.05, atDate);
-  const slope = (p2-p1)/(hugeS*0.05);
-  let maxP = mx, maxL = mn;
-  if (slope > 1e-4) maxP = Infinity;
-  else if (slope < -1e-4) maxL = -Infinity;
-  else { maxP = Math.max(maxP, p1); maxL = Math.min(maxL, p1); }
-  return {maxP, maxL};
-}
-function popEstimate(pts){
-  // P(P/L > 0 at expiry) under lognormal with ATM IV of the earliest expiry
-  const e = earliestExpiry(); if (!e || !state.spot) return null;
-  const ch = state.chain.get(e); if (!ch) return null;
-  const atm = nearestStrike(ch.strikes, state.spot);
-  const iv = (mid2 => mid2)( (ch.calls.get(atm)?.iv || 0) || (ch.puts.get(atm)?.iv || 0) ) || 0.25;
-  const T = yearsTo(e); if (T <= 0) return null;
-  const cdf = x => normCdf((Math.log(x/state.spot) - (R - iv*iv/2)*T)/(iv*Math.sqrt(T)));
-  let p = 0, inProfit = pts[0][1] > 0, start = 0; // start of profit region (as price)
-  const first = pts[0][0], last = pts[pts.length-1][0];
-  if (inProfit) start = first;
-  for (let i=1;i<pts.length;i++){
-    const cross = (pts[i-1][1]<=0) !== (pts[i][1]<=0);
-    if (cross){
-      const x = pts[i-1][0] + (pts[i][0]-pts[i-1][0])*(-pts[i-1][1])/((pts[i][1]-pts[i-1][1])||1e-9);
-      if (inProfit){ p += cdf(x) - cdf(start); inProfit=false; }
-      else { start = x; inProfit=true; }
-    }
-  }
-  if (inProfit) p += cdf(last*10) - cdf(start);           // open-ended upside
-  if (pts[0][1] > 0) p += cdf(first) - 0;                  // tail below sampled range
-  return Math.min(1, Math.max(0, p));
-}
-function netGreeks(){
-  const g = {delta:0,gamma:0,theta:0,vega:0,rho:0};
-  for (const l of state.legs){
-    if (l.type==='S'){ g.delta += l.side*l.qty; continue; }
-    const q = getQ(l.exp, l.type, l.strike);
-    let lg;
-    if (q && (q.delta || q.gamma || q.vega)) lg = q;
-    else lg = bsGreeks(l.type, state.spot, l.strike, yearsTo(l.exp), l.iv || 0.25);
-    for (const k of ['delta','gamma','theta','vega','rho']) g[k] += l.side*l.qty*100*(lg[k]||0);
-  }
-  return g;
-}
-
-</script>
-<script>
-
-"use strict";
-/* ---------- Freefly pure helpers (no DOM) ---------- */
-function vertPL(S, K1, K2, debit){           // long call vertical, per spread, at expiry
-  return (Math.max(S-K1,0) - Math.max(S-K2,0) - debit) * 100;
-}
-function flyPL(S, K1, K2, K3, netCost){      // long call fly (+1/-2/+1), netCost<0 = credit
-  return (Math.max(S-K1,0) - 2*Math.max(S-K2,0) + Math.max(S-K3,0) - netCost) * 100;
-}
-function scanFliesCore(e, S, rangePct, fee){
+function scanFliesCore(e, S, rangePct, fee, wings){      // wings: 'equal' | 'broken'
   const out = [];
   for (const t of ['C','P']){
     const m = t==='C' ? e.calls : e.puts;
     const ks = e.strikes.filter(k => Math.abs(k-S)/S <= rangePct)
       .filter(k => { const q=m.get(k); return q && q.bid>0 && q.ask>0; });
     for (let i=0;i<ks.length;i++) for (let j=i+1;j<ks.length;j++){
-      const K1=ks[i], K2=ks[j], K3=2*K2-K1;             // equal wings
-      const q3 = m.get(K3); if (!q3 || !(q3.bid>0 && q3.ask>0)) continue;
-      const q1=m.get(K1), q2=m.get(K2);
-      const exec = q1.ask - 2*q2.bid + q3.ask;           // buy wings at ask, sell body at bid
-      const midc = mid(q1) - 2*mid(q2) + mid(q3);
-      const fees = 4*fee;
-      out.push({t, K1, K2, K3, w:K2-K1, exec, midc,
-        minPL: -exec*100 - fees,                          // fly payoff floor is 0
-        maxPL: (K2-K1-exec)*100 - fees,
-        free: exec < 0});
+      const K1=ks[i], K2=ks[j];
+      const k3s = wings==='equal'
+        ? (ks.includes(2*K2-K1) ? [2*K2-K1] : [])
+        : ks.filter(k => k > K2);
+      for (const K3 of k3s){
+        const q1=m.get(K1), q2=m.get(K2), q3=m.get(K3);
+        if (!q3) continue;
+        const exec = q1.ask - 2*q2.bid + q3.ask;
+        const fees = 4*fee;
+        const floor = flyFloorPS(t, K1, K2, K3, exec)*100 - fees;
+        const ceil  = flyPLT(t, K2, K1, K2, K3, exec) - fees;
+        out.push({t, K1, K2, K3, exec, midc: mid(q1)-2*mid(q2)+mid(q3),
+          minPL: floor, maxPL: ceil, free: floor > 0,
+          ratio: floor<0 && ceil>0 ? ceil/(-floor) : Infinity});
+      }
     }
   }
-  out.sort((a,b)=>a.exec-b.exec);
-  return out.slice(0, 60);
+  out.sort((a,b)=> (b.free-a.free) || (b.minPL-a.minPL));
+  return out.slice(0, 80);
 }
-function freedomSpot(K2, K3, iv2, iv3, T, debit){
-  // spot at which selling the K2/K3 call spread (mid model) covers the debit
-  const f = S => bsPrice('C',S,K2,T,Math.max(iv2,0.02)) - bsPrice('C',S,K3,T,Math.max(iv3,0.02)) - debit;
-  let lo = K2*0.3, hi = K3*4;
-  if (f(hi) < 0) return null;                            // spread can never be worth the debit
-  if (f(lo) > 0) return lo;
-  for (let i=0;i<80;i++){ const m=(lo+hi)/2; (f(m)<0 ? lo=m : hi=m); }
+function spreadValueT(type, S, Kshort, Klong, T, ivS, ivL){
+  // value of the SHORT-TO-BE spread (sell Kshort, buy Klong), model mid
+  return bsPrice(type, S, Kshort, T, Math.max(ivS,0.02)) - bsPrice(type, S, Klong, T, Math.max(ivL,0.02));
+}
+function freedomSpotT(type, Kshort, Klong, ivS, ivL, T, debit){
+  const f = S => spreadValueT(type, S, Kshort, Klong, T, ivS, ivL) - debit;
+  // call spread value increases in S; put spread value decreases in S
+  let lo = Math.min(Kshort,Klong)*0.2, hi = Math.max(Kshort,Klong)*5;
+  const inc = type === 'C';
+  const fLo = f(lo), fHi = f(hi);
+  if (inc){ if (fHi < 0) return null; if (fLo > 0) return lo; }
+  else    { if (fLo < 0) return null; if (fHi > 0) return hi; }
+  for (let i=0;i<80;i++){
+    const m2=(lo+hi)/2, v=f(m2);
+    if (inc ? v<0 : v>0) lo=m2; else hi=m2;
+  }
   return (lo+hi)/2;
 }
-
+function ptouchAt(level, S0, iv, T){
+  if (level==null || !iv || T<=0) return null;
+  return Math.min(1, 2*normCdf(-Math.abs(Math.log(level/S0))/(iv*Math.sqrt(T))));
+}
+function mcCompare(type, K1, K2, K3, debit, S0, iv, T, iv2, iv3, nPaths){
+  // GBM (risk-neutral drift r), daily steps. Policy: convert when the sell-spread's
+  // model value >= debit. Mid fills, no fees — an EV framework, not a fill simulator.
+  const steps = Math.max(2, Math.round(T*365));
+  const dt = T/steps, drift=(R-iv*iv/2)*dt, vol=iv*Math.sqrt(dt);
+  let evHold=0, evLegin=0, conv=0;
+  let u=42;
+  const rnd=()=>{ u=(u*1664525+1013904223)>>>0; return u/4294967296; };
+  const gauss=()=>{ const a=Math.max(rnd(),1e-12), b=rnd(); return Math.sqrt(-2*Math.log(a))*Math.cos(2*Math.PI*b); };
+  const Ksell = type==='C' ? K2 : K2, Kbuy = type==='C' ? K3 : K1;   // spread sold to complete
+  const Klong0 = type==='C' ? K1 : K3, Kshort0 = type==='C' ? K2 : K2;
+  for (let p=0;p<nPaths;p++){
+    let S=S0, converted=false, credit=0;
+    for (let st=1; st<=steps; st++){
+      S *= Math.exp(drift + vol*gauss());
+      if (!converted){
+        const Trem = T - st*dt;
+        const v = spreadValueT(type, S, Ksell, Kbuy, Math.max(Trem,1e-6), iv2, iv3);
+        if (v >= debit){ converted=true; credit=v; if (st<steps) continue; }
+      }
+    }
+    const holdPL = vertPLT(type, S, Klong0, Kshort0, debit);
+    evHold += holdPL;
+    evLegin += converted ? flyPLT(type, S, Math.min(K1,K3)===K1?K1:K1, K2, K3, debit-credit) : holdPL;
+    if (converted) conv++;
+  }
+  return { evHold: evHold/nPaths, evLegin: evLegin/nPaths, pConv: conv/nPaths, nPaths };
+}
 </script>
 <script>
 
@@ -625,63 +361,87 @@ function renderExpSel(){
   const pick = state.expiries.find(e => yearsTo(e)*365 >= 20) || state.expiries[0];
   if (pick) sel.value = pick;
 }
-function callQ(exp,k){ const e=state.chain.get(exp); return e ? e.calls.get(k) : null; }
+function q_(exp,t,k){ const e=state.chain.get(exp); return e ? (t==='C'?e.calls:e.puts).get(k) : null; }
+function callQ(exp,k){ return q_(exp,'C',k); }
 
 function populateStrikes(){
   const exp = $('expSel').value, e = state.chain.get(exp);
   if (!e) return;
-  const S = state.spot;
-  const ks = e.strikes.filter(k => Math.abs(k-S)/S <= 0.15 && callQ(exp,k));
-  const opts = sel => ks.map(k=>`<option value="${k}">${k}</option>`).join('');
-  $('k1').innerHTML = opts(); $('k2').innerHTML = opts(); $('k3').innerHTML = opts();
-  const k1 = nearestStrike(ks, S), k2 = nearestStrike(ks, S*1.03);
-  const k3 = nearestStrike(ks, 2*k2-k1);
-  $('k1').value = k1; $('k2').value = Math.max(k2, offsetStrike(ks,k1,1)); $('k3').value = k3;
+  const S = state.spot, side = $('side').value;
+  const ks = e.strikes.filter(k => Math.abs(k-S)/S <= 0.15 && q_(exp,side,k));
+  const opts = ks.map(k=>`<option value="${k}">${k}</option>`).join('');
+  for (const id of ['k1','k2','k3','icShort','icLong']) $(id).innerHTML = opts;
+  if (side==='C'){
+    const k1 = nearestStrike(ks, S), k2 = Math.max(nearestStrike(ks, S*1.03), offsetStrike(ks,k1,1));
+    $('k1').value=k1; $('k2').value=k2; $('k3').value=nearestStrike(ks, 2*k2-k1);
+    $('lab1').textContent='K1 (long now)'; $('lab2').textContent='K2 (short)'; $('lab3').textContent='K3 (sell later)';
+  } else {
+    const k3 = nearestStrike(ks, S), k2 = Math.min(nearestStrike(ks, S*0.97), offsetStrike(ks,k3,-1));
+    $('k3').value=k3; $('k2').value=k2; $('k1').value=nearestStrike(ks, 2*k2-k3);
+    $('lab1').textContent='K1 (sell later)'; $('lab2').textContent='K2 (short)'; $('lab3').textContent='K3 (long now)';
+  }
+  const icS = $('icSide').value;
+  const short0 = nearestStrike(ks, S*(icS==='P'?0.95:1.05));
+  $('icShort').value = short0;
+  $('icLong').value = offsetStrike(ks, short0, icS==='P'?-2:2);
 }
+
 function currentVertDebit(){
-  const exp=$('expSel').value, K1=+$('k1').value, K2=+$('k2').value;
-  const q1=callQ(exp,K1), q2=callQ(exp,K2);
-  if (!q1||!q2) return 0;
-  return Math.max(0, q1.ask - q2.bid);
+  const exp=$('expSel').value, side=$('side').value;
+  const K1=+$('k1').value, K2=+$('k2').value, K3=+$('k3').value;
+  if (side==='C'){ const a=q_(exp,'C',K1), b=q_(exp,'C',K2); return (a&&b)? Math.max(0,a.ask-b.bid):0; }
+  const a=q_(exp,'P',K3), b=q_(exp,'P',K2); return (a&&b)? Math.max(0,a.ask-b.bid):0;
 }
+
+let cur = null;   // current computed setup, reused by MC / journal / charts
 function compute(){
   const exp=$('expSel').value, e=state.chain.get(exp); if (!e) return;
+  const side=$('side').value;
   let K1=+$('k1').value, K2=+$('k2').value, K3=+$('k3').value;
   if (!(K1<K2 && K2<K3)){ $('metrics').innerHTML='<div class="metric" style="grid-column:span 2"><div class="k">Setup</div><div class="v dn" style="font-size:12px">Need K1 &lt; K2 &lt; K3</div></div>'; return; }
-  const q1=callQ(exp,K1), q2=callQ(exp,K2), q3=callQ(exp,K3);
-  if (!q1||!q2||!q3) return;
   const debit = +$('debit').value || 0;
   const T = yearsTo(exp);
-  const creditNow = q2.bid - q3.ask;                       // sell K2 at bid, buy K3 at ask
+  const sellShortK = K2, sellLongK = side==='C' ? K3 : K1;
+  const qS = q_(exp,side,sellShortK), qL = q_(exp,side,sellLongK);
+  if (!qS || !qL) return;
+  const creditNow = qS.bid - qL.ask;
   const gap = debit - creditNow;
-  const fSpot = freedomSpot(K2, K3, q2.iv, q3.iv, T, debit);
-  const netIfNow = creditNow - debit;                      // per share; >=0 means free now
-  const asymTail = (K3-K2) - (K2-K1);                      // tail P/L per share above K3 = netIfNow - asymTail
-  const minFree = Math.min(netIfNow, netIfNow - asymTail) * 100;
+  const fSpot = freedomSpotT(side, sellShortK, sellLongK, qS.iv, qL.iv, T, debit);
+  const atmIv = atmIvFor(exp);
+  const pT = fSpot!=null ? ptouchAt(fSpot, state.spot, atmIv, T) : null;
+  const netCost = debit - creditNow;
+  const floor = flyFloorPS(side, K1, K2, K3, netCost)*100;
+  const peak  = flyPLT(side, K2, K1, K2, K3, netCost);
+  cur = {side,K1,K2,K3,debit,creditNow,netCost,T,exp,fSpot,pT,atmIv,ivS:qS.iv,ivL:qL.iv,floor,peak};
+  const asymNote = floor < (creditNow-debit)*100 - 0.5;
   const rows = [
-    ['Upper spread credit now (bid/ask)', `<span class="${cls$(creditNow)}">${fmt$(creditNow*100)}</span>`],
+    ['Sell-later spread credit now', `<span class="${cls$(creditNow)}">${fmt$(creditNow*100)}</span>`],
     ['Your debit to beat', fmt$(debit*100)],
     ['Gap to freedom', gap<=0 ? '<span class="up">FREE — credit covers debit</span>' : `<span class="dn">${fmt$(gap*100)} more credit needed</span>`],
     ['Freedom spot (model est.)', fSpot==null ? '<span class="dn">unreachable at current IV</span>' : `${fSpot.toFixed(2)} <small>(${(100*(fSpot/state.spot-1)).toFixed(1)}% away)</small>`],
-    ['Fly if completed now: min P/L', `<span class="${cls$(minFree)}">${fmt$(minFree)}</span>`],
-    ['Fly if completed now: max P/L', `<span class="up">${fmt$(((K2-K1)+netIfNow)*100)}</span>`],
+    ['P(reach freedom before exp)', pT==null ? '—' : `<span class="${pT>0.5?'up':'dn'}">≈ ${(100*pT).toFixed(0)}%</span> <small>touch approx.</small>`],
+    ['Fly if completed now: floor', `<span class="${cls$(floor)}">${fmt$(floor)}</span>${asymNote?' <small class="dn">wing asymmetry loss zone</small>':''}`],
+    ['Fly if completed now: peak', `<span class="up">${fmt$(peak)}</span>`],
     ['Until then, vertical max loss', `<span class="dn">${fmt$(-debit*100)}</span>`],
-    ['Wings', asymTail===0 ? 'symmetric — flat tails' : (asymTail<0 ? `upper wing narrower — tail bonus +${(-asymTail).toFixed(2)}/sh` : `<span class="dn">upper wing WIDER — tail loses ${asymTail.toFixed(2)}/sh above ${K3}; freedom needs credit &ge; debit + ${asymTail.toFixed(2)}</span>`)],
   ];
   $('metrics').innerHTML = rows.map(([k,v])=>`<div class="metric" style="grid-column:span 2"><div class="k">${k}</div><div class="v" style="font-size:12.5px">${v}</div></div>`).join('');
-  $('stratTitle').innerHTML = `${state.symbol} leg-in fly ${K1}/${K2}/${K3} <span style="font-family:var(--mono);font-size:11px;color:var(--faint)">${exp}</span>`;
-  drawStage({K1,K2,K3,debit,netIfNow});
+  $('stratTitle').innerHTML = `${state.symbol} ${side==='C'?'call':'put'}-side leg-in ${K1}/${K2}/${K3} <span style="font-family:var(--mono);font-size:11px;color:var(--faint)">${exp}</span>`;
+  $('mcOut').innerHTML = '';
+  drawStage(); drawDecay();
 }
-function drawStage(b){
+
+function drawStage(){
+  if (!cur) return;
   const cv=$('chart'), ctx=cv.getContext('2d');
   const dpr=window.devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight;
   cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
   const css=k=>getComputedStyle(document.documentElement).getPropertyValue(k).trim();
-  const a=b.K1*0.92, z=b.K3*1.08, N=201;
+  const {side,K1,K2,K3,debit,netCost} = cur;
+  const a=K1*0.90, z=K3*1.10, N=221;
   const vs=[], fs=[];
   for(let i=0;i<N;i++){ const S=a+(z-a)*i/(N-1);
-    vs.push([S, vertPL(S,b.K1,b.K2,b.debit)]);
-    fs.push([S, flyPL(S,b.K1,b.K2,b.K3,-b.netIfNow)]); }
+    vs.push([S, side==='C' ? vertPLT('C',S,K1,K2,debit) : vertPLT('P',S,K3,K2,debit)]);
+    fs.push([S, flyPLT(side,S,K1,K2,K3,netCost)]); }
   let yMin=Math.min(0,...vs.map(p=>p[1]),...fs.map(p=>p[1]));
   let yMax=Math.max(0,...vs.map(p=>p[1]),...fs.map(p=>p[1]));
   const padY=Math.max((yMax-yMin)*0.12,10); yMin-=padY; yMax+=padY;
@@ -693,18 +453,127 @@ function drawStage(b){
   for(let i=0;i<=6;i++){const v=a+(z-a)*i/6;ctx.textAlign='center';ctx.fillText(v.toFixed(1),X(v),H-pad.b+15);}
   const zero=Y(0);
   ctx.strokeStyle=css('--line');ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(pad.l,zero);ctx.lineTo(W-pad.r,zero);ctx.stroke();
-  const sx=X(state.spot);
-  if (state.spot>a && state.spot<z){ ctx.setLineDash([3,4]);ctx.strokeStyle=css('--faint');ctx.beginPath();ctx.moveTo(sx,pad.t);ctx.lineTo(sx,H-pad.b);ctx.stroke();ctx.setLineDash([]);
+  if (state.spot>a && state.spot<z){ const sx=X(state.spot);
+    ctx.setLineDash([3,4]);ctx.strokeStyle=css('--faint');ctx.beginPath();ctx.moveTo(sx,pad.t);ctx.lineTo(sx,H-pad.b);ctx.stroke();ctx.setLineDash([]);
     ctx.fillStyle=css('--muted');ctx.textAlign='center';ctx.fillText('spot',sx,pad.t+10); }
+  if (cur.fSpot!=null && cur.fSpot>a && cur.fSpot<z){ const fx=X(cur.fSpot);
+    ctx.setLineDash([2,3]);ctx.strokeStyle=css('--accent');ctx.beginPath();ctx.moveTo(fx,pad.t);ctx.lineTo(fx,H-pad.b);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=css('--accent');ctx.textAlign='center';ctx.fillText('freedom',fx,pad.t+10); }
   ctx.setLineDash([5,4]);ctx.strokeStyle=css('--blue');ctx.lineWidth=1.7;
   ctx.beginPath();vs.forEach(([x,y],i)=>i?ctx.lineTo(X(x),Y(y)):ctx.moveTo(X(x),Y(y)));ctx.stroke();ctx.setLineDash([]);
   ctx.strokeStyle=css('--accent');ctx.lineWidth=2.2;
   ctx.beginPath();fs.forEach(([x,y],i)=>i?ctx.lineTo(X(x),Y(y)):ctx.moveTo(X(x),Y(y)));ctx.stroke();
 }
+
+function drawDecay(){
+  const cv=$('decayChart'); if (!cv || !cur) return;
+  const ctx=cv.getContext('2d'), dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth, H=cv.clientHeight;
+  cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  const css=k=>getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+  const DTE = Math.max(1, Math.round(cur.T*365));
+  const pts=[];
+  const step = Math.max(1, Math.floor(DTE/40));
+  for (let d=0; d<DTE; d+=step){
+    const Trem = Math.max((DTE-d)/365, 0.5/365);
+    const f = freedomSpotT(cur.side, cur.K2, cur.side==='C'?cur.K3:cur.K1, cur.ivS, cur.ivL, Trem, cur.debit);
+    pts.push([d, f]);
+  }
+  const valid = pts.filter(p=>p[1]!=null);
+  if (valid.length<2){ ctx.fillStyle=css('--faint'); ctx.font='11px JetBrains Mono, monospace'; ctx.fillText('freedom unreachable at every remaining tenor at this IV', 16, 24); return; }
+  const ys=valid.map(p=>p[1]).concat([state.spot]);
+  const y0=Math.min(...ys)*0.995, y1=Math.max(...ys)*1.005;
+  const pad={l:60,r:14,t:12,b:24};
+  const X=d=>pad.l+d/DTE*(W-pad.l-pad.r), Y=v=>pad.t+(y1-v)/((y1-y0)||1)*(H-pad.t-pad.b);
+  ctx.font='9.5px JetBrains Mono, monospace'; ctx.strokeStyle=css('--line-soft'); ctx.fillStyle=css('--faint');
+  for(let i=0;i<=3;i++){const v=y0+(y1-y0)*i/3,y=Y(v);ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.textAlign='right';ctx.fillText(v.toFixed(1),pad.l-6,y+3);}
+  for(let d=0;d<=DTE;d+=Math.max(5,step*5)){ctx.textAlign='center';ctx.fillText('+'+d+'d',X(d),H-8);}
+  ctx.setLineDash([3,4]); ctx.strokeStyle=css('--faint');
+  ctx.beginPath(); ctx.moveTo(pad.l,Y(state.spot)); ctx.lineTo(W-pad.r,Y(state.spot)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle=css('--muted'); ctx.textAlign='left'; ctx.fillText('spot today '+state.spot.toFixed(2), pad.l+4, Y(state.spot)-4);
+  ctx.strokeStyle=css('--accent'); ctx.lineWidth=2;
+  let started=false; ctx.beginPath();
+  for (const [d,f] of pts){ if (f==null){ started=false; continue; } if(!started){ctx.moveTo(X(d),Y(f));started=true;} else ctx.lineTo(X(d),Y(f)); }
+  ctx.stroke();
+  ctx.fillStyle=css('--faint'); ctx.textAlign='left';
+  ctx.fillText('price needed for freedom, by days elapsed (line ends where unreachable)', pad.l+4, 12);
+}
+
+function runMc(){
+  if (!cur) return;
+  $('runMc').disabled = true; $('runMc').textContent = 'simulating…';
+  setTimeout(()=>{
+    const m = mcCompare(cur.side, cur.K1, cur.K2, cur.K3, cur.debit, state.spot, cur.atmIv||0.25, cur.T, cur.ivS, cur.ivL, 5000);
+    $('mcOut').innerHTML =
+      `EV hold vertical to expiry: <b class="${cls$(m.evHold)}">${fmt$(m.evHold)}</b><br>` +
+      `EV leg-in plan (convert at freedom): <b class="${cls$(m.evLegin)}">${fmt$(m.evLegin)}</b><br>` +
+      `P(freedom triggers): <b>${(100*m.pConv).toFixed(0)}%</b> · ${m.nPaths} GBM paths, mid fills, no fees<br>` +
+      `<span style="color:var(--faint)">The two EVs are typically ≈ equal: conversion reshapes the distribution (adds a floor, caps a tail) — it does not create expected value.</span>`;
+    $('runMc').disabled = false; $('runMc').textContent = '▶ Run 5,000-path EV comparison (hold vs leg-in)';
+  }, 30);
+}
+
+/* ---------- journal ---------- */
+function renderJournal(){
+  const log = sbGet('sb_ffLog', []);
+  const done = log.filter(x=>x.status!=='open');
+  const freed = log.filter(x=>x.status==='freed').length;
+  $('hitRate').textContent = done.length ? `${freed}/${done.length} freed (${(100*freed/done.length).toFixed(0)}%)` : '';
+  $('journal').innerHTML = log.length ? log.map((x,i)=>
+    `<div style="border:1px solid var(--line-soft);border-radius:6px;padding:4px 8px;display:flex;gap:6px;align-items:center">
+      <span style="flex:1">${x.d} ${x.sym} ${x.side} ${x.ks} d=${x.debit} f@${x.fs??'—'} p${x.pt??'—'}%</span>
+      ${x.status==='open' ? `<a data-a="freed" data-i="${i}" style="color:var(--profit);cursor:pointer">✓</a><a data-a="failed" data-i="${i}" style="color:var(--loss);cursor:pointer">✗</a>` : `<span class="${x.status==='freed'?'up':'dn'}">${x.status}</span>`}
+      <a data-a="del" data-i="${i}" style="color:var(--faint);cursor:pointer">×</a>
+    </div>`).join('') : '<span style="color:var(--faint)">log setups here, then mark ✓ freed or ✗ failed — build your own hit-rate, the number the videos never show</span>';
+  $('journal').querySelectorAll('a').forEach(a=>a.addEventListener('click',()=>{
+    const log = sbGet('sb_ffLog', []); const i=+a.dataset.i;
+    if (a.dataset.a==='del') log.splice(i,1); else log[i].status = a.dataset.a;
+    sbSet('sb_ffLog', log); renderJournal();
+  }));
+}
+function logSetup(){
+  if (!cur) return;
+  const log = sbGet('sb_ffLog', []);
+  log.unshift({ d:new Date().toISOString().slice(0,10), sym:state.symbol, side:cur.side,
+    ks:`${cur.K1}/${cur.K2}/${cur.K3}`, debit:cur.debit.toFixed(2),
+    fs: cur.fSpot!=null?cur.fSpot.toFixed(2):null, pt: cur.pT!=null?(100*cur.pT).toFixed(0):null,
+    exp:cur.exp, status:'open' });
+  sbSet('sb_ffLog', log.slice(0,30)); renderJournal();
+}
+
+/* ---------- IC roll planner ---------- */
+function icPlan(){
+  const exp=$('expSel').value, e=state.chain.get(exp); if (!e){ $('icStatus').textContent='—'; return; }
+  const t=$('icSide').value, u=t==='P'?'C':'P';
+  const sK=+$('icShort').value, lK=+$('icLong').value;
+  const qs=q_(exp,t,sK), ql=q_(exp,t,lK);
+  if (!qs||!ql){ $('icStatus').textContent='pick strikes'; return; }
+  const width = Math.abs(sK-lK);
+  const closeCost = (qs.ask - ql.bid)*100;
+  const banked = +$('icCred').value||0;
+  const em = expectedMove(exp);
+  const S = state.spot;
+  const ks = e.strikes.filter(k=>q_(exp,u,k));
+  const tgt = u==='C' ? S + (em ?? S*0.03) : S - (em ?? S*0.03);
+  const nS = nearestStrike(ks, tgt);
+  const nL = nearestStrike(ks, u==='C' ? nS+width : nS-width);
+  const qns=q_(exp,u,nS), qnl=q_(exp,u,nL);
+  const rollCred = (qns && qnl) ? (qns.bid - qnl.ask)*100 : 0;
+  const banked2 = banked - closeCost + rollCred;
+  const need = Math.abs(nS-nL)*100;
+  $('icStatus').innerHTML =
+    `close threatened ${t} ${sK}/${lK} now: <span class="dn">${fmt$(-closeCost)}</span><br>` +
+    `roll ${u==='C'?'call':'put'} side to ${nS}/${nL} (~1σ): credit <span class="${cls$(rollCred)}">${fmt$(rollCred)}</span><br>` +
+    `banked after close + roll: <b>${fmt$(banked2)}</b> vs remaining width ${fmt$(need)}<br>` +
+    (banked2>=need ? `<span class="up">LOCKED: worst case ${fmt$(banked2-need)} profit.</span>`
+                   : `<span class="dn">not free — worst case ${fmt$(banked2-need)};</span> need ${fmt$(need-banked2)} more in credits.`);
+}
+
 function scanUI(){
   const exp=$('expSel').value, e=state.chain.get(exp); if(!e) return;
-  const list = scanFliesCore(e, state.spot, 0.10, 0.66);
-  $('scanLabel').textContent = `${exp} · executable pricing`;
+  const wings = $('wingsMode').value;
+  const list = scanFliesCore(e, state.spot, 0.10, 0.66, wings);
+  $('scanLabel').textContent = `${exp} · ${wings} wings · executable pricing`;
   const freeCt = list.filter(x=>x.free).length;
   const rows = list.slice(0,30).map(x=>`
     <tr>
@@ -714,22 +583,14 @@ function scanUI(){
       <td>${x.midc.toFixed(2)}</td>
       <td class="${cls$(x.minPL)}">${fmt$(x.minPL)}</td>
       <td class="up">${fmt$(x.maxPL)}</td>
+      <td>${x.ratio===Infinity?'∞':x.ratio.toFixed(1)}</td>
       <td>${x.free ? '<span class="up">ENTRY CREDIT?! verify live — almost certainly stale</span>' : '<span style="color:var(--faint)">no free lunch</span>'}</td>
     </tr>`).join('');
   $('results').innerHTML = `<div style="padding:8px 14px;font-family:var(--mono);font-size:11px;color:${freeCt? 'var(--accent)':'var(--faint)'};border-bottom:1px solid var(--line)">
       ${freeCt ? freeCt+' fly(s) show an entry credit at executable prices — on a 15-min delayed feed treat these as stale quotes until verified live.' : 'Scanned '+list.length+' equal-wing flies: none can be entered for a credit at executable prices. The market does not sell free butterflies.'}
     </div>
-    <table class="chain"><thead><tr><th>Type</th><th style="text-align:center">Strikes</th><th>Exec cost</th><th>Mid cost</th><th>Min P/L</th><th>Max P/L</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table class="chain"><thead><tr><th>Type</th><th style="text-align:center">Strikes</th><th>Exec cost</th><th>Mid cost</th><th>Min P/L</th><th>Max P/L</th><th>Ceil/Floor</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-function icCheck(){
-  const cr = +$('icCred').value||0, w = (+$('icWidth').value||0)*100;
-  if (!w){ $('icStatus').textContent='—'; return; }
-  const gap = w - cr;
-  $('icStatus').innerHTML = gap<=0
-    ? `<span class="up">LOCKED: banked ${fmt$(cr)} &ge; max remaining loss ${fmt$(w)}. Worst case ${fmt$(cr-w)} profit.</span>`
-    : `<span class="dn">Not free: worst case is still ${fmt$(-(gap))}.</span> Need ${fmt$(gap)} more in credits (rolls/closes) before the position is mathematically risk-free.`;
-}
-
 async function loadSymbol(sym){
   const btn=$('loadBtn'); btn.disabled=true; btn.textContent='Loading…'; banner('');
   try{
@@ -737,9 +598,10 @@ async function loadSymbol(sym){
     const json = await fetchCboe(sym);
     ingestChain(json, sym);
     if (!state.expiries.length) throw new Error('no listed options');
+    sbSet('sb_lastTicker', state.symbol);
     renderQuote(); renderExpSel(); populateStrikes();
     $('debit').value = currentVertDebit().toFixed(2);
-    compute(); scanUI();
+    compute(); scanUI(); icPlan();
   }catch(err){
     banner(`Couldn't load <b>${sym}</b> (${err.message}). <a id="demoLink">Load the demo chain</a> instead.`);
     document.getElementById('demoLink').addEventListener('click', ()=>{ buildDemoChain(); renderQuote(); renderExpSel(); populateStrikes(); $('debit').value=currentVertDebit().toFixed(2); compute(); scanUI(); });
@@ -749,10 +611,15 @@ $('loadBtn').addEventListener('click',()=>loadSymbol($('ticker').value.trim().to
 $('ticker').addEventListener('keydown',e=>{if(e.key==='Enter')$('loadBtn').click();});
 $('expSel').addEventListener('change',()=>{ populateStrikes(); $('debit').value=currentVertDebit().toFixed(2); compute(); scanUI(); });
 for (const id of ['k1','k2','k3','debit']) $(id).addEventListener('change', compute);
+$('side').addEventListener('change', ()=>{ populateStrikes(); $('debit').value=currentVertDebit().toFixed(2); compute(); icPlan(); });
 $('useNow').addEventListener('click',()=>{ $('debit').value=currentVertDebit().toFixed(2); compute(); });
-for (const id of ['icCred','icWidth']) $(id).addEventListener('input', icCheck);
-window.addEventListener('resize', compute);
-loadSymbol('SPY');
+$('wingsMode').addEventListener('change', scanUI);
+$('runMc').addEventListener('click', runMc);
+$('logBtn').addEventListener('click', logSetup);
+for (const id of ['icCred','icSide','icShort','icLong']) $(id).addEventListener('change', icPlan);
+window.addEventListener('resize', ()=>{ drawStage(); drawDecay(); });
+renderJournal();
+loadSymbol(sbGet('sb_lastTicker','SPY'));
 
 </script>
 </body>
